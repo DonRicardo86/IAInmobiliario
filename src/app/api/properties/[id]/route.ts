@@ -1,0 +1,52 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { UnifiedDataService } from '@/core/database/supabase-adapter';
+import { authenticateAdminRequest, unauthorizedResponse } from '@/core/auth/auth-guard';
+
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const property = await UnifiedDataService.getPropertyById(id);
+    if (!property) {
+      return NextResponse.json({ success: false, error: 'Inmueble no encontrado' }, { status: 404 });
+    }
+
+    const authSession = await authenticateAdminRequest(req);
+    if (!authSession) {
+      return NextResponse.json({
+        success: true,
+        property: {
+          ...property,
+          internalAddress: 'Dirección privada protegida (Modo Demostración)',
+        },
+      });
+    }
+
+    return NextResponse.json({ success: true, property });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
+
+export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const body = await req.json();
+
+    const authSession = await authenticateAdminRequest(req);
+    const updated = await UnifiedDataService.updateProperty(id, body);
+    return NextResponse.json({ success: true, property: updated, demoMode: !authSession });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+  }
+}
+
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const authSession = await authenticateAdminRequest(req);
+    const deleted = await UnifiedDataService.deleteProperty(id);
+    return NextResponse.json({ success: deleted, demoMode: !authSession });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+}
