@@ -30,9 +30,17 @@ export async function GET(req: NextRequest) {
     const leads = await UnifiedDataService.getLeads(filters, orgId);
     const stats = await UnifiedDataService.getStats(orgId);
 
+    const sanitizedLeads = !authSession
+      ? leads.map((l) => ({
+          ...l,
+          phone: l.phone ? l.phone.slice(0, 7) + '****' : '+57 300 ****00',
+          email: 'contacto-demo@inmobiliariapremier.co',
+        }))
+      : leads;
+
     return NextResponse.json({
       success: true,
-      leads,
+      leads: sanitizedLeads,
       stats,
       demoMode: !authSession,
     });

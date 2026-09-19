@@ -167,7 +167,7 @@ export const LeadModal: React.FC<LeadModalProps> = ({
             </div>
             <Input
               label="Teléfono / WhatsApp"
-              placeholder="+57 300 123 4567"
+              placeholder="+57 300 000 0000"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               error={errors.phone}

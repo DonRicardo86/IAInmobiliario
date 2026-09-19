@@ -587,7 +587,7 @@ export default function AsistenteIAPage() {
               />
               <Input
                 label="Teléfono / WhatsApp"
-                placeholder="+57 300 123 4567"
+                placeholder="+57 300 000 0000"
                 value={leadPhone}
                 onChange={(e) => setLeadPhone(e.target.value)}
                 required

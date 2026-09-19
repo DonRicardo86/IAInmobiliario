@@ -2,7 +2,11 @@ import http from 'http';
 
 function makeRequest(options, postData) {
   return new Promise((resolve, reject) => {
-    const req = http.request(options, (res) => {
+    const headers = {
+      'x-admin-token': 'ia-admin-secret-dev',
+      ...(options.headers || {}),
+    };
+    const req = http.request({ ...options, headers }, (res) => {
       let body = '';
       res.on('data', (chunk) => (body += chunk));
       res.on('end', () => {

@@ -67,9 +67,13 @@ export async function POST(req: NextRequest) {
 
     // Authenticate admin request
     const authSession = await authenticateAdminRequest(req);
+    if (!authSession) {
+      return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para registrar propiedades en el inventario.');
+    }
+
     const created = await UnifiedDataService.createProperty({
       ...body,
-      organizationId: authSession?.organizationId || body.organizationId,
+      organizationId: authSession.organizationId,
     });
 
     return NextResponse.json({ success: true, property: created }, { status: 201 });

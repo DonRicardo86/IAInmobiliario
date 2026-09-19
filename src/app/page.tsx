@@ -18,11 +18,13 @@ import {
   Lock,
   PhoneCall,
   Check,
+  Mail,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useToast } from '@/components/ui/Toast';
 import { leadService } from '@/core/services/lead.service';
+import { COMMERCIAL_CONFIG } from '@/core/config/commercial.config';
 
 export default function MarketingLandingPage() {
   const { showToast } = useToast();
@@ -487,30 +489,52 @@ export default function MarketingLandingPage() {
               <CheckCircle2 size={48} color="var(--accent-emerald)" style={{ margin: '0 auto 1rem' }} />
               <h3 style={{ fontSize: '1.35rem', color: '#fff', fontWeight: 800 }}>¡Solicitud de Demostración Recibida!</h3>
               <p style={{ fontSize: '0.92rem', color: 'var(--text-secondary)', marginTop: '0.5rem', lineHeight: 1.6, maxWidth: '600px', margin: '0.5rem auto 1.5rem' }}>
-                Hemos registrado tu solicitud comercial para <strong>{agencyName}</strong>. Puedes conectar de inmediato con nuestro especialista de producto o esperar nuestro contacto por WhatsApp/correo.
+                Hemos registrado tu solicitud comercial para <strong>{agencyName}</strong>. Nuestro equipo comercial se comunicará contigo para coordinar la sesión demostrativa.
               </p>
               <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-                <a
-                  href={`https://wa.me/573001234567?text=${encodeURIComponent(`Hola, soy ${contactName} de la inmobiliaria ${agencyName} en ${city}. Deseo agendar una demostración comercial de IA Inmobiliaria para nuestro inventario de ${inventorySize}.`)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    backgroundColor: '#25D366',
-                    color: '#fff',
-                    padding: '0.75rem 1.5rem',
-                    borderRadius: 'var(--radius-md)',
-                    fontWeight: 700,
-                    fontSize: '0.95rem',
-                    textDecoration: 'none',
-                    boxShadow: '0 4px 14px rgba(37, 211, 102, 0.4)',
-                  }}
-                >
-                  <MessageSquare size={18} />
-                  <span>Chatear por WhatsApp Ahora</span>
-                </a>
+                {COMMERCIAL_CONFIG.hasRealWhatsApp() ? (
+                  <a
+                    href={COMMERCIAL_CONFIG.getWhatsAppLink(`Hola, soy ${contactName} de la inmobiliaria ${agencyName} en ${city}. Deseo agendar una demostración comercial de IA Inmobiliaria para nuestro inventario de ${inventorySize}.`) || '#'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      backgroundColor: '#25D366',
+                      color: '#fff',
+                      padding: '0.75rem 1.5rem',
+                      borderRadius: 'var(--radius-md)',
+                      fontWeight: 700,
+                      fontSize: '0.95rem',
+                      textDecoration: 'none',
+                      boxShadow: '0 4px 14px rgba(37, 211, 102, 0.4)',
+                    }}
+                  >
+                    <MessageSquare size={18} />
+                    <span>Chatear por WhatsApp Ahora</span>
+                  </a>
+                ) : (
+                  <a
+                    href={COMMERCIAL_CONFIG.getMailtoLink(`Solicitud de Demostración: ${agencyName}`, `Inmobiliaria: ${agencyName}\nContacto: ${contactName}\nTeléfono: ${contactPhone}\nCorreo: ${contactEmail}\nCiudad: ${city}\nInventario: ${inventorySize}`)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      backgroundColor: 'var(--primary)',
+                      color: '#fff',
+                      padding: '0.75rem 1.5rem',
+                      borderRadius: 'var(--radius-md)',
+                      fontWeight: 700,
+                      fontSize: '0.95rem',
+                      textDecoration: 'none',
+                      boxShadow: '0 4px 14px rgba(79, 70, 229, 0.4)',
+                    }}
+                  >
+                    <Mail size={18} />
+                    <span>Contactar por Correo Corporativo</span>
+                  </a>
+                )}
                 <Button variant="outline" size="md" onClick={() => setSubmitted(false)}>
                   Enviar otra solicitud
                 </Button>
@@ -538,7 +562,7 @@ export default function MarketingLandingPage() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                 <Input
                   label="Teléfono Celular / WhatsApp"
-                  placeholder="+57 300 123 4567"
+                  placeholder="+57 300 000 0000"
                   value={contactPhone}
                   onChange={(e) => setContactPhone(e.target.value)}
                   required

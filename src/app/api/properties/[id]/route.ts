@@ -33,8 +33,12 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const body = await req.json();
 
     const authSession = await authenticateAdminRequest(req);
+    if (!authSession) {
+      return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para modificar inmuebles.');
+    }
+
     const updated = await UnifiedDataService.updateProperty(id, body);
-    return NextResponse.json({ success: true, property: updated, demoMode: !authSession });
+    return NextResponse.json({ success: true, property: updated });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 400 });
   }
@@ -44,8 +48,12 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   try {
     const { id } = await params;
     const authSession = await authenticateAdminRequest(req);
+    if (!authSession) {
+      return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para eliminar inmuebles.');
+    }
+
     const deleted = await UnifiedDataService.deleteProperty(id);
-    return NextResponse.json({ success: deleted, demoMode: !authSession });
+    return NextResponse.json({ success: deleted });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }

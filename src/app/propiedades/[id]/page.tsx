@@ -22,10 +22,11 @@ import {
   ArrowLeft,
   CheckCircle2,
   Share2,
+  Mail,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { whatsappService } from '@/integrations/whatsapp/whatsapp.service';
+import { COMMERCIAL_CONFIG } from '@/core/config/commercial.config';
 
 export default function PublicPropertyDetailPage() {
   const params = useParams();
@@ -91,7 +92,8 @@ export default function PublicPropertyDetailPage() {
     : 'Incluida en el valor';
 
   const waMsg = `Hola, estoy interesado en el inmueble Ref ${property.code}: ${property.title} en ${property.zone}. ¿Cuándo podemos agendar una visita?`;
-  const waLink = whatsappService.getWhatsAppDirectLink('+573009123456', waMsg);
+  const hasWhatsApp = COMMERCIAL_CONFIG.hasRealWhatsApp();
+  const waLink = COMMERCIAL_CONFIG.getWhatsAppLink(waMsg);
 
   const handleLeadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,26 +155,51 @@ export default function PublicPropertyDetailPage() {
           </Link>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            <a
-              href={waLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                backgroundColor: '#25D366',
-                color: '#fff',
-                padding: '0.45rem 0.9rem',
-                borderRadius: 'var(--radius-md)',
-                fontSize: '0.84rem',
-                fontWeight: 600,
-                textDecoration: 'none',
-              }}
-            >
-              <MessageSquare size={16} />
-              <span>WhatsApp Directo</span>
-            </a>
+            {hasWhatsApp && waLink ? (
+              <a
+                href={waLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  backgroundColor: '#25D366',
+                  color: '#fff',
+                  padding: '0.45rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.84rem',
+                  fontWeight: 600,
+                  textDecoration: 'none',
+                }}
+              >
+                <MessageSquare size={16} />
+                <span>WhatsApp Directo</span>
+              </a>
+            ) : (
+              <a
+                href={COMMERCIAL_CONFIG.getMailtoLink(
+                  `Consulta Inmueble ${property.code}`,
+                  `Hola, deseo información sobre el inmueble ${property.code}: ${property.title}`
+                )}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                  color: '#fff',
+                  padding: '0.45rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.84rem',
+                  fontWeight: 600,
+                  textDecoration: 'none',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <Mail size={16} />
+                <span>Contacto Inmobiliaria</span>
+              </a>
+            )}
           </div>
         </div>
       </header>
@@ -351,7 +378,7 @@ export default function PublicPropertyDetailPage() {
                   />
                   <Input
                     label="Teléfono / WhatsApp"
-                    placeholder="+57 300 123 4567"
+                    placeholder="+57 300 000 0000"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     required
@@ -391,25 +418,48 @@ export default function PublicPropertyDetailPage() {
 
                   <div style={{ textAlign: 'center', marginTop: '0.25rem' }}>
                     <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>O contáctanos directamente:</span>
-                    <a
-                      href={waLink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '0.4rem',
-                        color: '#25D366',
-                        fontSize: '0.86rem',
-                        fontWeight: 600,
-                        marginTop: '0.35rem',
-                        textDecoration: 'none',
-                      }}
-                    >
-                      <MessageSquare size={15} />
-                      <span>Escribir por WhatsApp</span>
-                    </a>
+                    {hasWhatsApp && waLink ? (
+                      <a
+                        href={waLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.4rem',
+                          color: '#25D366',
+                          fontSize: '0.86rem',
+                          fontWeight: 600,
+                          marginTop: '0.35rem',
+                          textDecoration: 'none',
+                        }}
+                      >
+                        <MessageSquare size={15} />
+                        <span>Escribir por WhatsApp</span>
+                      </a>
+                    ) : (
+                      <a
+                        href={COMMERCIAL_CONFIG.getMailtoLink(
+                          `Consulta Inmueble Ref ${property.code}: ${property.title}`,
+                          `Hola,\n\nEstoy interesado en información sobre el inmueble Ref ${property.code} (${property.title}) en ${property.zone}.\n\nNombre: ${name || 'Interesado'}\nTeléfono: ${phone || 'Por definir'}`
+                        )}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.4rem',
+                          color: 'var(--primary-light)',
+                          fontSize: '0.86rem',
+                          fontWeight: 600,
+                          marginTop: '0.35rem',
+                          textDecoration: 'none',
+                        }}
+                      >
+                        <Mail size={15} />
+                        <span>Contactar por Correo Corporativo</span>
+                      </a>
+                    )}
                   </div>
                 </form>
               )}
