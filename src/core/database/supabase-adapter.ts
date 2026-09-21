@@ -4,29 +4,79 @@ import { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
 import { Organization, DEFAULT_ORGANIZATION } from '../types/organization';
 import { ServerStore } from './server-store';
 
-let supabaseClient: SupabaseClient | null = null;
+let supabaseAnonClient: SupabaseClient | null = null;
+let supabaseAdminClient: SupabaseClient | null = null;
 
-export function getSupabaseClient(): SupabaseClient | null {
-  if (supabaseClient) return supabaseClient;
+export function getSupabaseAnonClient(): SupabaseClient | null {
+  if (supabaseAnonClient) return supabaseAnonClient;
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (url && key && url.startsWith('http')) {
+  if (url && anonKey && url.startsWith('http')) {
     try {
-      supabaseClient = createClient(url, key, {
-        auth: {
-          persistSession: false,
-        },
+      supabaseAnonClient = createClient(url, anonKey, {
+        auth: { persistSession: false },
       });
-      return supabaseClient;
+      return supabaseAnonClient;
     } catch (e) {
-      console.error('[SupabaseAdapter] Failed to initialize Supabase client', e);
+      console.error('[SupabaseAdapter] Failed to initialize anonymous Supabase client', e);
       return null;
     }
   }
-
   return null;
+}
+
+export function getSupabaseAdminClient(): SupabaseClient | null {
+  if (supabaseAdminClient) return supabaseAdminClient;
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (url && serviceKey && url.startsWith('http')) {
+    try {
+      supabaseAdminClient = createClient(url, serviceKey, {
+        auth: { persistSession: false },
+      });
+      return supabaseAdminClient;
+    } catch (e) {
+      console.error('[SupabaseAdapter] Failed to initialize admin Supabase client', e);
+      return null;
+    }
+  }
+  return null;
+}
+
+export function getSupabaseUserClient(authToken?: string): SupabaseClient | null {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !anonKey || !url.startsWith('http')) return null;
+
+  if (authToken) {
+    const cleanToken = authToken.replace(/^Bearer\s+/i, '').trim();
+    try {
+      return createClient(url, anonKey, {
+        auth: { persistSession: false },
+        global: {
+          headers: {
+            Authorization: `Bearer ${cleanToken}`,
+          },
+        },
+      });
+    } catch (e) {
+      console.error('[SupabaseAdapter] Failed to initialize authenticated user client', e);
+    }
+  }
+
+  return getSupabaseAnonClient();
+}
+
+export function getSupabaseClient(authToken?: string): SupabaseClient | null {
+  if (authToken) {
+    return getSupabaseUserClient(authToken);
+  }
+  return getSupabaseAdminClient() || getSupabaseAnonClient();
 }
 
 export function isSupabaseConnected(): boolean {
