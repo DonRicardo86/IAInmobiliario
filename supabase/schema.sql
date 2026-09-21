@@ -594,3 +594,7 @@ GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated, service_r
 GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO authenticated, service_role;
 
+-- Revocación de privilegios automáticos por defecto en PostgreSQL para funciones futuras
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon;
+
+
