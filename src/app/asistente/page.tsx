@@ -35,6 +35,52 @@ interface ChatMessage {
   timestamp: string;
 }
 
+function FormattedChatMessage({ content }: { content: string }) {
+  const lines = content.split('\n');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+      {lines.map((line, lineIdx) => {
+        if (!line.trim()) {
+          return <div key={lineIdx} style={{ height: '0.35rem' }} />;
+        }
+
+        const isBullet = line.trim().startsWith('•') || line.trim().startsWith('-');
+        const cleanLine = isBullet ? line.trim().replace(/^[•-]\s*/, '') : line;
+
+        // Parse bold markers **text**
+        const parts = cleanLine.split(/(\*\*[^*]+\*\*)/g);
+
+        const rendered = parts.map((part, pIdx) => {
+          if (part.startsWith('**') && part.endsWith('**')) {
+            return (
+              <strong key={pIdx} style={{ color: '#ffffff', fontWeight: 700 }}>
+                {part.slice(2, -2)}
+              </strong>
+            );
+          }
+          return <span key={pIdx}>{part}</span>;
+        });
+
+        if (isBullet) {
+          return (
+            <div key={lineIdx} style={{ display: 'flex', gap: '0.45rem', paddingLeft: '0.4rem', alignItems: 'baseline' }}>
+              <span style={{ color: 'var(--secondary)', fontSize: '0.9rem' }}>•</span>
+              <span style={{ flex: 1 }}>{rendered}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div key={lineIdx} style={{ margin: 0, lineHeight: 1.55 }}>
+            {rendered}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function AsistenteIAContent() {
   const { showToast } = useToast();
   const searchParams = useSearchParams();
@@ -345,15 +391,13 @@ function AsistenteIAContent() {
                     backgroundColor: isBot ? 'var(--bg-card)' : 'var(--primary)',
                     border: isBot ? '1px solid var(--border-card)' : 'none',
                     borderRadius: isBot ? '4px 16px 16px 16px' : '16px 4px 16px 16px',
-                    padding: '1rem 1.25rem',
+                    padding: '0.9rem 1.15rem',
                     color: '#fff',
                     fontSize: '0.92rem',
-                    lineHeight: 1.6,
-                    whiteSpace: 'pre-line',
                     boxShadow: 'var(--shadow-md)',
                   }}
                 >
-                  {msg.text}
+                  <FormattedChatMessage content={msg.text} />
                 </div>
 
                 {/* Embedded Real Property Cards */}

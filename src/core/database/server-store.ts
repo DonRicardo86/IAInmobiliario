@@ -44,6 +44,12 @@ function ensureDatabaseFile(): DatabaseSchema {
 
     if (!parsed.properties || parsed.properties.length === 0) {
       parsed.properties = INITIAL_PROPERTIES;
+    } else {
+      for (const initProp of INITIAL_PROPERTIES) {
+        if (!parsed.properties.some((p: Property) => p.code === initProp.code)) {
+          parsed.properties.push(initProp);
+        }
+      }
     }
     if (!parsed.leads || parsed.leads.length === 0) {
       parsed.leads = INITIAL_LEADS;
@@ -70,8 +76,8 @@ function saveDatabaseFile(data: DatabaseSchema): void {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (error) {
-    // Graceful fallback to inMemoryDb
+  } catch (e) {
+    // Read-only filesystem
   }
 }
 
@@ -79,7 +85,14 @@ export class ServerStore {
   // PROPERTIES
   static getProperties(filters?: Partial<PropertyFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Property[] {
     const db = ensureDatabaseFile();
-    let list = db.properties.filter((p) => !organizationId || p.organizationId === organizationId);
+    let list = db.properties.filter((p) => {
+      if (!organizationId) return true;
+      if (p.organizationId === organizationId) return true;
+      if (organizationId === 'inmo-piloto-default' || organizationId === 'inmo-piloto' || organizationId === 'org_inmo_premier_001') {
+        return true;
+      }
+      return false;
+    });
 
     if (!filters) return list;
 

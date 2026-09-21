@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
-
-interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-}
+import { PropertyPublicView } from '@/core/types/property';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { messages, userContext, leadCapture, organizationId, orgSlug } = body;
 
-    // 1. Resolve organization safely from slug or ID against Supabase / database
+    // 1. Resolve organization safely from slug or ID against Supabase
     const identifier = orgSlug || organizationId || req.nextUrl.searchParams.get('org') || DEFAULT_ORGANIZATION.slug;
     const org = await UnifiedDataService.getPublicOrganizationBySlugOrId(identifier);
 
@@ -86,225 +82,352 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Conversational natural language parsing in Colombian Spanish
-    const lastUserMessage = messages && messages.length > 0 ? messages[messages.length - 1].content : '';
+    // 3. Conversational State & Context Management
+    const lastUserMessage = messages && messages.length > 0 ? messages[messages.length - 1].content.trim() : '';
     const textLower = lastUserMessage.toLowerCase();
+    const context = userContext || {};
 
-    // Accumulate criteria from previous context (preserves conversation history)
-    const parsedCriteria: any = { ...(userContext || {}) };
+    let activePropertyCode: string | null = context.activePropertyCode || null;
+    let activeProperty: PropertyPublicView | null = context.activeProperty || null;
 
-    // 3.1 Detect explicit property code (e.g. INM-585, INM585, INM-968, 585)
-    const codeMatch = textLower.match(/\b(inm-?\d{1,6}|pilot-?\d{1,6}|prem-?\d{1,6})\b/i);
-    if (codeMatch) {
-      parsedCriteria.code = codeMatch[1].toUpperCase().replace(/\s+/g, '');
-      parsedCriteria.searchQuery = parsedCriteria.code;
+    // Helper formatters
+    const formatMoney = (val: number) =>
+      new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(val);
+
+    // 3.1 Check if user explicitly mentioned a new property code in the current message
+    const explicitCodeMatch = textLower.match(/\b(inm-?\d{1,6}|pilot-?\d{1,6}|prem-?\d{1,6}|cas-?\d{1,6}|apt-?\d{1,6}|ofi-?\d{1,6}|loc-?\d{1,6})\b/i);
+    let requestedCode: string | null = null;
+    if (explicitCodeMatch && explicitCodeMatch[1]) {
+      let codeStr = explicitCodeMatch[1].toUpperCase().replace(/\s+/g, '');
+      if (!codeStr.includes('-')) {
+        codeStr = codeStr.replace(/^([A-Z]+)(\d+)$/, '$1-$2');
+      }
+      requestedCode = codeStr;
     } else {
       const bareCodeMatch = textLower.match(/(?:inmueble|código|codigo|propiedad|ref)\s*[:#]?\s*(\d{2,6})/i);
-      if (bareCodeMatch) {
-        parsedCriteria.code = `INM-${bareCodeMatch[1]}`;
-        parsedCriteria.searchQuery = parsedCriteria.code;
+      if (bareCodeMatch && bareCodeMatch[1]) {
+        requestedCode = `INM-${bareCodeMatch[1]}`;
       }
     }
 
-    // 3.2 Detect operation
-    if (textLower.includes('arrendar') || textLower.includes('alquilar') || textLower.includes('arriendo') || textLower.includes('alquiler') || textLower.includes('rentar') || textLower.includes('en renta')) {
-      parsedCriteria.operation = 'arriendo';
-    } else if (textLower.includes('comprar') || textLower.includes('compra') || textLower.includes('venta') || textLower.includes('en venta') || textLower.includes('adquirir') || textLower.includes('inversión') || textLower.includes('invertir')) {
-      parsedCriteria.operation = 'compra';
+    // 3.2 Determine intent type
+    const isNewSearchQuery =
+      textLower.includes('otros') ||
+      textLower.includes('otras') ||
+      textLower.includes('otra propiedad') ||
+      textLower.includes('otro apartamento') ||
+      textLower.includes('más económico') ||
+      textLower.includes('mas economico') ||
+      textLower.includes('más barato') ||
+      textLower.includes('mas barato') ||
+      textLower.includes('más accesible') ||
+      textLower.includes('mas accesible') ||
+      textLower.includes('menor precio') ||
+      textLower.includes('mayor precio') ||
+      textLower.includes('otra opción') ||
+      textLower.includes('otra opcion') ||
+      textLower.includes('buscar en') ||
+      textLower.includes('muéstrame en') ||
+      textLower.includes('muestrame en') ||
+      textLower.includes('en arriendo') && !activePropertyCode ||
+      textLower.includes('en venta') && !activePropertyCode;
+
+    // If an explicit new code is requested, it overrides active property
+    if (requestedCode) {
+      activePropertyCode = requestedCode;
+      activeProperty = null; // Force fresh query
     }
 
-    // 3.3 Detect property type
-    if (textLower.includes('apartamento') || textLower.includes('apartaestudio') || textLower.includes('apto') || textLower.includes('loft')) {
-      parsedCriteria.propertyType = 'apartamento';
-    } else if (textLower.includes('casa campestre') || textLower.includes('casa')) {
-      parsedCriteria.propertyType = 'casa';
-    } else if (textLower.includes('penthouse') || textLower.includes('ph') || textLower.includes('ático') || textLower.includes('atico')) {
-      parsedCriteria.propertyType = 'penthouse';
-    } else if (textLower.includes('oficina') || textLower.includes('consultorio')) {
-      parsedCriteria.propertyType = 'oficina';
-    } else if (textLower.includes('local') || textLower.includes('local comercial')) {
-      parsedCriteria.propertyType = 'local';
-    } else if (textLower.includes('finca') || textLower.includes('hacienda') || textLower.includes('parcela')) {
-      parsedCriteria.propertyType = 'finca';
-    } else if (textLower.includes('lote') || textLower.includes('terreno')) {
-      parsedCriteria.propertyType = 'lote';
-    } else if (textLower.includes('bodega') || textLower.includes('galpón') || textLower.includes('galpon')) {
-      parsedCriteria.propertyType = 'bodega';
-    }
-
-    // 3.4 Detect municipalities and Colombian zones / barrios
-    if (textLower.includes('medellín') || textLower.includes('medellin')) {
-      parsedCriteria.municipality = 'Medellín';
-    }
-    if (textLower.includes('envigado')) {
-      parsedCriteria.municipality = 'Envigado';
-    }
-    if (textLower.includes('sabaneta')) {
-      parsedCriteria.municipality = 'Sabaneta';
-    }
-    if (textLower.includes('itagüí') || textLower.includes('itagui')) {
-      parsedCriteria.municipality = 'Itagüí';
-    }
-    if (textLower.includes('bello')) {
-      parsedCriteria.municipality = 'Bello';
-    }
-    if (textLower.includes('rionegro')) {
-      parsedCriteria.municipality = 'Rionegro';
-    }
-    if (textLower.includes('llanogrande')) {
-      parsedCriteria.municipality = 'Rionegro';
-      parsedCriteria.zone = 'Llanogrande';
-    }
-    if (textLower.includes('bogotá') || textLower.includes('bogota')) {
-      parsedCriteria.municipality = 'Bogotá';
-    }
-
-    // Zones & Neighborhoods
-    if (textLower.includes('poblado') || textLower.includes('castropol') || textLower.includes('manila') || textLower.includes('provenza') || textLower.includes('san fernando') || textLower.includes('asturias') || textLower.includes('patio bonito') || textLower.includes('lalinde') || textLower.includes('los balsos') || textLower.includes('el tesoro') || textLower.includes('las palmas')) {
-      parsedCriteria.zone = 'El Poblado';
-      parsedCriteria.municipality = 'Medellín';
-    } else if (textLower.includes('laureles') || textLower.includes('estadio') || textLower.includes('conquistadores') || textLower.includes('florida nueva') || textLower.includes('san joaquín') || textLower.includes('san joaquin')) {
-      parsedCriteria.zone = 'Laureles';
-      parsedCriteria.municipality = 'Medellín';
-    } else if (textLower.includes('belén') || textLower.includes('belen') || textLower.includes('la mota') || textLower.includes('loma de los bernal') || textLower.includes('fátima') || textLower.includes('fatima')) {
-      parsedCriteria.zone = 'Belén';
-      parsedCriteria.municipality = 'Medellín';
-    } else if (textLower.includes('chapinero') || textLower.includes('rosales') || textLower.includes('chicó') || textLower.includes('chico') || textLower.includes('usaquén') || textLower.includes('usaquen') || textLower.includes('cedritos') || textLower.includes('santa bárbara')) {
-      parsedCriteria.municipality = 'Bogotá';
-      if (textLower.includes('chapinero') || textLower.includes('rosales')) parsedCriteria.zone = 'Chapinero / Rosales';
-      if (textLower.includes('usaquén') || textLower.includes('usaquen')) parsedCriteria.zone = 'Usaquén';
-      if (textLower.includes('chicó') || textLower.includes('chico')) parsedCriteria.zone = 'Chicó';
-      if (textLower.includes('cedritos')) parsedCriteria.zone = 'Cedritos';
-    }
-
-    // 3.5 Detect bedrooms / alcobas
-    if (textLower.includes('1 habitacion') || textLower.includes('1 habitación') || textLower.includes('1 alcoba') || textLower.includes('una habitacion') || textLower.includes('un cuarto') || textLower.includes('una alcoba')) {
-      parsedCriteria.minBedrooms = 1;
-    } else if (textLower.includes('2 habitacion') || textLower.includes('2 habitaciones') || textLower.includes('dos habitacion') || textLower.includes('dos habitaciones') || textLower.includes('2 alcobas') || textLower.includes('dos alcobas') || textLower.includes('2 cuartos') || textLower.includes('dos cuartos')) {
-      parsedCriteria.minBedrooms = 2;
-    } else if (textLower.includes('3 habitacion') || textLower.includes('3 habitaciones') || textLower.includes('tres habitacion') || textLower.includes('tres habitaciones') || textLower.includes('3 alcobas') || textLower.includes('tres alcobas') || textLower.includes('3 cuartos') || textLower.includes('tres cuartos')) {
-      parsedCriteria.minBedrooms = 3;
-    } else if (textLower.includes('4 habitacion') || textLower.includes('4 habitaciones') || textLower.includes('cuatro habitacion') || textLower.includes('cuatro alcobas') || textLower.includes('4 alcobas')) {
-      parsedCriteria.minBedrooms = 4;
-    }
-
-    // 3.6 Detect bathrooms
-    if (textLower.includes('1 baño') || textLower.includes('un baño')) {
-      parsedCriteria.minBathrooms = 1;
-    } else if (textLower.includes('2 baños') || textLower.includes('dos baños') || textLower.includes('2 banos')) {
-      parsedCriteria.minBathrooms = 2;
-    } else if (textLower.includes('3 baños') || textLower.includes('tres baños') || textLower.includes('3 banos')) {
-      parsedCriteria.minBathrooms = 3;
-    }
-
-    // 3.7 Detect budget (pesos colombianos)
-    const formattedPesosMatch = textLower.match(/\$?\s*(\d{1,3}(?:[.,]\d{3}){1,3})/);
-    if (formattedPesosMatch) {
-      const cleanNumStr = formattedPesosMatch[1].replace(/[.,]/g, '');
-      const parsedNum = parseInt(cleanNumStr, 10);
-      if (parsedNum > 100000) {
-        parsedCriteria.maxBudget = parsedNum;
+    // Load active property from Supabase if we have a code but no cached object or code changed
+    if (activePropertyCode && (!activeProperty || activeProperty.code !== activePropertyCode)) {
+      const codeMatches = await UnifiedDataService.matchPropertiesForAssistant({ code: activePropertyCode }, targetOrgId);
+      if (codeMatches.length > 0) {
+        activeProperty = codeMatches[0];
       }
-    } else {
-      const millionMatch = textLower.match(/(\d+[\.,]?\d*)\s*(millones|millón|millon|m|mdp)/);
-      if (millionMatch) {
-        const num = parseFloat(millionMatch[1].replace(',', '.'));
-        parsedCriteria.maxBudget = num * 1000000;
-      } else if (textLower.includes('dos millones y medio') || textLower.includes('2 millones y medio')) {
-        parsedCriteria.maxBudget = 2500000;
+    }
+
+    // 3.3 Check if this is a follow-up attribute question on the ACTIVE property
+    const isAskingAboutActive = !isNewSearchQuery && !requestedCode && !!activeProperty;
+
+    let responseText = '';
+    let matchedPropertiesToReturn: PropertyPublicView[] = [];
+    let updatedCriteria: any = { ...context };
+
+    if (isAskingAboutActive && activeProperty) {
+      // -----------------------------------------------------------------------------------
+      // INTENT: SPECIFIC ATTRIBUTE QUERY ABOUT ACTIVE PROPERTY (NO visual card repeat)
+      // -----------------------------------------------------------------------------------
+      const p = activeProperty;
+      const formattedPrice = formatMoney(p.priceCOP);
+      const formattedAdmin = p.adminFeeCOP ? formatMoney(p.adminFeeCOP) : null;
+
+      // Question A: Location / Barrio / Ubicación
+      if (
+        textLower.includes('barrio') ||
+        textLower.includes('ubicad') ||
+        textLower.includes('ubicaci') ||
+        textLower.includes('dónde queda') ||
+        textLower.includes('donde queda') ||
+        textLower.includes('dónde está') ||
+        textLower.includes('donde esta') ||
+        textLower.includes('sector') ||
+        textLower.includes('zona') ||
+        textLower.includes('direcci') ||
+        textLower.includes('lugar')
+      ) {
+        responseText = `Está ubicado en **${p.zone}, ${p.municipality}**.`;
+      }
+      // Question B: Habitaciones / Alcobas / Cuartos
+      else if (
+        textLower.includes('habitaci') ||
+        textLower.includes('alcoba') ||
+        textLower.includes('cuarto') ||
+        textLower.includes('dormitorio') ||
+        textLower.includes('piezas')
+      ) {
+        responseText = `Tiene **${p.bedrooms} ${p.bedrooms === 1 ? 'habitación' : 'habitaciones'}**.`;
+      }
+      // Question C: Baños
+      else if (textLower.includes('baño') || textLower.includes('bano')) {
+        responseText = `Tiene **${p.bathrooms} ${p.bathrooms === 1 ? 'baño' : 'baños'}**.`;
+      }
+      // Question D: Precio / Costo / Canon / Valor
+      else if (
+        textLower.includes('cuánto cuesta') ||
+        textLower.includes('cuanto cuesta') ||
+        textLower.includes('cuánto vale') ||
+        textLower.includes('cuanto vale') ||
+        textLower.includes('precio') ||
+        textLower.includes('costo') ||
+        textLower.includes('canon') ||
+        textLower.includes('arriendo') ||
+        textLower.includes('administraci')
+      ) {
+        if (textLower.includes('administraci') && formattedAdmin) {
+          responseText = `El valor de administración del inmueble **${p.code}** es de **${formattedAdmin} mensuales**.`;
+        } else if (p.operation === 'arriendo') {
+          responseText = `El canon de arriendo es de **${formattedPrice} mensuales**${formattedAdmin ? ` (administración: ${formattedAdmin})` : ''}.`;
+        } else {
+          responseText = `El precio de venta es de **${formattedPrice}**.`;
+        }
+      }
+      // Question E: Área / Metros cuadrados
+      else if (
+        textLower.includes('metro') ||
+        textLower.includes('área') ||
+        textLower.includes('area') ||
+        textLower.includes('m2') ||
+        textLower.includes('tamaño') ||
+        textLower.includes('tamano') ||
+        textLower.includes('superficie')
+      ) {
+        responseText = `Cuenta con un área de **${p.areaM2} m²**.`;
+      }
+      // Question F: Parqueadero / Garaje
+      else if (
+        textLower.includes('parqueadero') ||
+        textLower.includes('garaje') ||
+        textLower.includes('estacionamiento') ||
+        textLower.includes('parqueaderos') ||
+        textLower.includes('carro')
+      ) {
+        responseText = p.parkingSpots && p.parkingSpots > 0
+          ? `Cuenta con **${p.parkingSpots} ${p.parkingSpots === 1 ? 'parqueadero privado' : 'parqueaderos privados'}**.`
+          : `No cuenta con parqueadero privado asignado en la ficha pública.`;
+      }
+      // Question G: Estrato
+      else if (textLower.includes('estrato')) {
+        responseText = p.stratum
+          ? `Es estrato **${p.stratum}**.`
+          : `El estrato no se encuentra especificado en la ficha pública.`;
+      }
+      // Question H: Visitas / Citas / Agendamiento
+      else if (
+        textLower.includes('visit') ||
+        textLower.includes('conocer') ||
+        textLower.includes('cita') ||
+        textLower.includes('agend') ||
+        textLower.includes('ir a ver') ||
+        textLower.includes('verlo') ||
+        textLower.includes('cuándo puedo') ||
+        textLower.includes('cuando puedo')
+      ) {
+        responseText = `¡Con gusto! Para coordinar una visita al inmueble **${p.code} (${p.title})**, haz clic en el botón **"Solicitar Asesoría Humana"** o déjanos tu nombre y número de teléfono para que un asesor comercial de **${org.name}** se comunique contigo y verifique los horarios disponibles.`;
+      }
+      // Question I: Características generales / Amenidades
+      else if (
+        textLower.includes('característica') ||
+        textLower.includes('caracteristica') ||
+        textLower.includes('amenidad') ||
+        textLower.includes('balcón') ||
+        textLower.includes('balcon') ||
+        textLower.includes('piscina') ||
+        textLower.includes('cocina') ||
+        textLower.includes('acabado') ||
+        textLower.includes('detalles')
+      ) {
+        const feats = p.features && p.features.length > 0 ? p.features.join(', ') : 'No se especifican características adicionales';
+        responseText = `El inmueble **${p.code}** cuenta con las siguientes características confirmadas: ${feats}.\n\nDescripción: ${p.description}`;
       } else {
-        const rawNumberMatch = textLower.match(/\$?\s*(\d{7,11})/);
-        if (rawNumberMatch) {
-          parsedCriteria.maxBudget = parseInt(rawNumberMatch[1], 10);
-        }
+        // Fallback natural concise response on active property
+        responseText = `El inmueble activo es **${p.title}** (${p.code}) en **${p.zone}, ${p.municipality}** por **${formattedPrice}** (${p.bedrooms} alcobas, ${p.bathrooms} baños, ${p.areaM2} m²).\n\n¿Deseas conocer algún detalle específico como barrio, precio, habitaciones o coordinar una visita?`;
       }
-    }
 
-    // 4. Query matching public properties from Supabase PostgreSQL
-    const matches = await UnifiedDataService.matchPropertiesForAssistant(parsedCriteria, targetOrgId);
+      // STRICT RULE: Do NOT attach visual cards on specific attribute questions
+      matchedPropertiesToReturn = [];
+      updatedCriteria.activePropertyCode = p.code;
+      updatedCriteria.activeProperty = p;
 
-    // 5. OpenAI Live Model (if configured)
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (apiKey && apiKey.startsWith('sk-')) {
-      try {
-        const systemPrompt = `Eres ${org.aiAssistantName}, la asesora virtual inmobiliaria oficial de ${org.name} en Colombia.
-Tu objetivo es orientar con calidez y precisión a compradores y arrendatarios, consultar el catálogo público oficial y captar sus datos para que un asesor humano agende visitas.
+    } else if (requestedCode && activeProperty) {
+      // -----------------------------------------------------------------------------------
+      // INTENT: INITIAL PROPERTY LOOKUP BY CODE (Show visual card once)
+      // -----------------------------------------------------------------------------------
+      const p = activeProperty;
+      const formattedPrice = formatMoney(p.priceCOP);
+      const opText = p.operation === 'arriendo' ? 'canon mensual' : 'precio de venta';
 
-REGLAS ESTRICTAS DE NEGOCIO Y HONESTIDAD:
-1. NUNCA inventes inmuebles, códigos, precios, ubicaciones ni disponibilidades.
-2. Estos son los inmuebles REALES y CONFIRMADOS en la base de datos de ${org.name} que coinciden con la búsqueda:
-${JSON.stringify(matches, null, 2)}
-3. Si hay propiedades coincidentes, preséntalas con precisión indicando código, zona, precio en COP, alcobas y baños.
-4. Si la lista está vacía (no hay coincidencias), dilo cordialmente e invita al usuario a ampliar sus criterios de búsqueda (ej. zona o presupuesto) o a hacer clic en "Solicitar Asesoría Humana" para recibir atención personalizada de un agente.
-5. NO afirmes que existen proyectos privados u opciones adicionales si no tienes información verificada para ofrecerlas.
-6. Comunícate en español de Colombia, con tono profesional, empático, cálido y conciso.`;
+      responseText = `Con gusto te presento el inmueble **${p.title}** (${p.code}), ubicado en **${p.zone}, ${p.municipality}**:\n\n• **Precio:** ${formattedPrice} (${opText})\n• **Distribución:** ${p.bedrooms} alcobas | ${p.bathrooms} baños | ${p.areaM2} m²${p.parkingSpots ? ` | ${p.parkingSpots} parqueadero(s)` : ''}\n• **Descripción:** ${p.description}\n\n¿Te gustaría saber más sobre su ubicación, habitaciones, precio o agendar una visita?`;
+      matchedPropertiesToReturn = [p];
+      updatedCriteria.activePropertyCode = p.code;
+      updatedCriteria.activeProperty = p;
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'system', content: systemPrompt }, ...(messages || [])],
-            temperature: 0.7,
-            max_tokens: 500,
-          }),
-        });
+    } else if (requestedCode && !activeProperty) {
+      // Code not found
+      responseText = `He consultado el catálogo oficial de **${org.name}** y actualmente no tenemos ningún inmueble disponible con el código **${requestedCode}**.\n\nPuedes consultar nuestro catálogo general o hacer clic en **"Solicitar Asesoría Humana"** para que un asesor te asista.`;
+      matchedPropertiesToReturn = [];
+      updatedCriteria.activePropertyCode = null;
+      updatedCriteria.activeProperty = null;
 
-        if (response.ok) {
-          const data = await response.json();
-          const aiText = data.choices[0].message.content;
-          return NextResponse.json({
-            success: true,
-            mode: 'openai_live',
-            aiModel: 'gpt-4o-mini',
-            response: aiText,
-            matchedProperties: matches,
-            updatedCriteria: parsedCriteria,
-            organization: {
-              id: org.id,
-              name: org.name,
-              slug: org.slug,
-              city: org.city,
-              aiAssistantName: org.aiAssistantName,
-            },
-          });
-        }
-      } catch (err) {
-        console.error('OpenAI call failed, falling back to rule-based engine', err);
-      }
-    }
-
-    // 6. Rule-based Natural Language Assistant Engine
-    let assistantResponse = '';
-    const hasOperation = !!parsedCriteria.operation;
-    const hasType = !!parsedCriteria.propertyType;
-    const hasLocation = !!parsedCriteria.municipality || !!parsedCriteria.zone;
-    const hasBudget = !!parsedCriteria.maxBudget;
-    const hasCode = !!parsedCriteria.code;
-
-    if (matches.length > 0) {
-      const opText = parsedCriteria.operation === 'compra' ? 'en venta' : parsedCriteria.operation === 'arriendo' ? 'en arrendamiento' : 'disponibles';
-      assistantResponse = `¡Excelente! He consultado el inventario en tiempo real de **${org.name}** y encontré ${matches.length} ${matches.length === 1 ? 'inmueble confirmado' : 'inmuebles confirmados'} que ${matches.length === 1 ? 'coincide' : 'coinciden'} con tu búsqueda ${opText}:\n\n` +
-        matches.map((p, i) => `${i + 1}. **${p.title}** (Código: **${p.code}**) en **${p.municipality} — ${p.zone}**\n   • **Precio:** ${new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(p.priceCOP)}\n   • **Detalles:** ${p.areaM2} m² | ${p.bedrooms} alcobas | ${p.bathrooms} baños${p.parkingSpots ? ` | ${p.parkingSpots} parqueadero(s)` : ''}\n   • **Descripción:** ${p.description}`).join('\n\n') +
-        `\n\n¿Te gustaría agendar una visita a este inmueble? Haz clic en el botón **"Solicitar Asesoría Humana"** o déjame tu nombre y teléfono para que un asesor comercial de ${org.name} te contacte directamente.`;
-    } else if (hasCode) {
-      assistantResponse = `He consultado el catálogo de **${org.name}** y no encontramos ningún inmueble disponible con el código **${parsedCriteria.code}**.\n\nPuedes revisar nuestro catálogo general o hacer clic en **"Solicitar Asesoría Humana"** para que un asesor te ayude a localizar el inmueble.`;
-    } else if (hasOperation || hasType || hasLocation || hasBudget) {
-      assistantResponse = `He consultado el catálogo en tiempo real de **${org.name}** y actualmente no tenemos inmuebles disponibles que coincidan exactamente con todos los criterios indicados.\n\nTe sugerimos ampliar la zona de búsqueda o ajustar el rango de presupuesto. También puedes hacer clic en **"Solicitar Asesoría Humana"** o dejarnos tus datos de contacto para que un asesor te oriente de manera personalizada.`;
     } else {
-      assistantResponse = org.aiAssistantWelcomeMessage || `¡Hola! Soy ${org.aiAssistantName} de ${org.name}. Con mucho gusto te ayudo a encontrar tu propiedad ideal en ${org.city || 'Colombia'}. Para recomendarte las mejores opciones de nuestro inventario, cuéntame:\n\n1. ¿Estás buscando **comprar** o **arrendar**?\n2. ¿Qué tipo de inmueble prefieres (apartamento, casa, apartaestudio, oficina, etc.)?\n3. ¿En qué zona de tu interés?\n4. ¿Cuál es tu presupuesto estimado?`;
+      // -----------------------------------------------------------------------------------
+      // INTENT: GENERAL SEARCH OR CRITERIA MODIFICATION (e.g. "¿Tienes otros más económicos?")
+      // -----------------------------------------------------------------------------------
+      // Parse new criteria
+      const searchCriteria: any = {};
+
+      if (isNewSearchQuery) {
+        // If user asks for cheaper options, look for lower budget than active property
+        if (
+          textLower.includes('más económico') ||
+          textLower.includes('mas economico') ||
+          textLower.includes('más barato') ||
+          textLower.includes('mas barato') ||
+          textLower.includes('menor precio')
+        ) {
+          const currentPrice = activeProperty ? activeProperty.priceCOP : (context.maxBudget || 3000000);
+          searchCriteria.maxBudget = Math.max(500000, currentPrice - 100000);
+          searchCriteria.operation = activeProperty ? activeProperty.operation : (context.operation || 'arriendo');
+          searchCriteria.propertyType = activeProperty ? activeProperty.type : (context.propertyType || 'apartamento');
+        }
+      }
+
+      // Parse Operation
+      if (textLower.includes('arrendar') || textLower.includes('alquilar') || textLower.includes('arriendo') || textLower.includes('alquiler') || textLower.includes('rentar')) {
+        searchCriteria.operation = 'arriendo';
+      } else if (textLower.includes('comprar') || textLower.includes('compra') || textLower.includes('venta') || textLower.includes('en venta') || textLower.includes('inversión')) {
+        searchCriteria.operation = 'compra';
+      }
+
+      // Parse Property Type
+      if (textLower.includes('apartamento') || textLower.includes('apartaestudio') || textLower.includes('apto')) {
+        searchCriteria.propertyType = 'apartamento';
+      } else if (textLower.includes('casa campestre') || textLower.includes('casa')) {
+        searchCriteria.propertyType = 'casa';
+      } else if (textLower.includes('penthouse') || textLower.includes('ph')) {
+        searchCriteria.propertyType = 'penthouse';
+      } else if (textLower.includes('oficina')) {
+        searchCriteria.propertyType = 'oficina';
+      } else if (textLower.includes('local')) {
+        searchCriteria.propertyType = 'local';
+      }
+
+      // Parse Municipalities & Zones
+      if (textLower.includes('medellín') || textLower.includes('medellin')) {
+        searchCriteria.municipality = 'Medellín';
+      } else if (textLower.includes('envigado')) {
+        searchCriteria.municipality = 'Envigado';
+      } else if (textLower.includes('sabaneta')) {
+        searchCriteria.municipality = 'Sabaneta';
+      } else if (textLower.includes('rionegro')) {
+        searchCriteria.municipality = 'Rionegro';
+      }
+
+      if (textLower.includes('poblado') || textLower.includes('castropol') || textLower.includes('provenza')) {
+        searchCriteria.zone = 'El Poblado';
+        searchCriteria.municipality = 'Medellín';
+      } else if (textLower.includes('laureles') || textLower.includes('estadio')) {
+        searchCriteria.zone = 'Laureles';
+        searchCriteria.municipality = 'Medellín';
+      } else if (textLower.includes('belén') || textLower.includes('belen')) {
+        searchCriteria.zone = 'Belén';
+        searchCriteria.municipality = 'Medellín';
+      }
+
+      // Parse Budget
+      const formattedPesosMatch = textLower.match(/\$?\s*(\d{1,3}(?:[.,]\d{3}){1,3})/);
+      if (formattedPesosMatch) {
+        const cleanNumStr = formattedPesosMatch[1].replace(/[.,]/g, '');
+        const parsedNum = parseInt(cleanNumStr, 10);
+        if (parsedNum > 100000) searchCriteria.maxBudget = parsedNum;
+      } else {
+        const millionMatch = textLower.match(/(\d+[\.,]?\d*)\s*(millones|millón|millon|m|mdp)/);
+        if (millionMatch) {
+          const num = parseFloat(millionMatch[1].replace(',', '.'));
+          searchCriteria.maxBudget = num * 1000000;
+        }
+      }
+
+      // Merge with accumulated context
+      const finalCriteria = {
+        ...context,
+        ...searchCriteria,
+      };
+
+      // Query database
+      const matches = await UnifiedDataService.matchPropertiesForAssistant(finalCriteria, targetOrgId);
+
+      // Exclude previous active property if searching for "otros"
+      const filteredMatches = (isNewSearchQuery && activeProperty)
+        ? matches.filter((m) => m.code !== activeProperty.code)
+        : matches;
+
+      if (filteredMatches.length > 0) {
+        const countText = filteredMatches.length === 1 ? '1 opción disponible' : `${filteredMatches.length} opciones disponibles`;
+        responseText = `He consultado el inventario de **${org.name}** y encontré ${countText} que se ajusta a tu búsqueda:\n\n` +
+          filteredMatches.map((p, i) => `${i + 1}. **${p.title}** (${p.code}) en **${p.zone}, ${p.municipality}**\n   • **Precio:** ${formatMoney(p.priceCOP)} (${p.operation === 'arriendo' ? 'arriendo mensual' : 'venta'})\n   • **Distribución:** ${p.bedrooms} alcobas | ${p.bathrooms} baños | ${p.areaM2} m²`).join('\n\n') +
+          `\n\n¿Te gustaría ver la ficha de alguno de estos inmuebles o agendar una visita?`;
+
+        matchedPropertiesToReturn = filteredMatches;
+        if (filteredMatches.length === 1) {
+          updatedCriteria.activePropertyCode = filteredMatches[0].code;
+          updatedCriteria.activeProperty = filteredMatches[0];
+        } else {
+          updatedCriteria.activePropertyCode = null;
+          updatedCriteria.activeProperty = null;
+        }
+      } else if (isNewSearchQuery) {
+        responseText = `He revisado nuestro catálogo en **${org.name}** y actualmente no tenemos otras opciones con esos parámetros exactos.\n\nPuedes ampliar los criterios de búsqueda o hacer clic en **"Solicitar Asesoría Humana"** para que un asesor te ayude a encontrar alternativas.`;
+        matchedPropertiesToReturn = [];
+      } else {
+        responseText = org.aiAssistantWelcomeMessage || `¡Hola! Soy ${org.aiAssistantName} de ${org.name}. Con mucho gusto te ayudo a encontrar tu propiedad ideal en ${org.city || 'Medellín'}. Cuéntame:\n\n1. ¿Buscas **comprar** o **arrendar**?\n2. ¿Qué tipo de inmueble prefieres (apartamento, casa, apartaestudio)?\n3. ¿En qué zona o presupuesto aproximado?`;
+        matchedPropertiesToReturn = [];
+      }
+
+      updatedCriteria = {
+        ...finalCriteria,
+        activePropertyCode: updatedCriteria.activePropertyCode,
+        activeProperty: updatedCriteria.activeProperty,
+      };
     }
 
+    // 4. Return clean, structured JSON
     return NextResponse.json({
       success: true,
-      mode: 'rule_based_engine',
+      mode: 'conversational_engine',
       modeNotice: `Asistente Oficial • ${org.name}`,
-      response: assistantResponse,
-      matchedProperties: matches,
-      updatedCriteria: parsedCriteria,
+      response: responseText,
+      matchedProperties: matchedPropertiesToReturn,
+      updatedCriteria: updatedCriteria,
       organization: {
         id: org.id,
         name: org.name,
