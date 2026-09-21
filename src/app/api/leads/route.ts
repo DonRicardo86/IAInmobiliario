@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
     } else {
       // If unauthenticated: apply anti-abuse rate limiter
       const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
-      const isAllowed = checkRateLimit(clientIp, 15, 60000);
+      const isAllowed = await checkRateLimit(clientIp, 'api/leads', 15, 60);
       if (!isAllowed) {
         return rateLimitResponse('Has enviado demasiadas solicitudes. Por favor espera un minuto antes de reintentar.');
       }

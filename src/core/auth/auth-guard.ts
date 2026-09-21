@@ -11,15 +11,44 @@ export interface AuthSession {
   isDemoUser?: boolean;
 }
 
-// In-memory sliding-window rate limiter for public endpoints (anti-abuse)
-const rateLimitMap = new Map<string, { count: number; expiresAt: number }>();
+// In-memory fallback sliding-window rate limiter
+const inMemoryRateLimitMap = new Map<string, { count: number; expiresAt: number }>();
 
-export function checkRateLimit(identifier: string, maxRequests = 10, windowMs = 60000): boolean {
+/**
+ * Serverless-resilient rate limiter:
+ * Uses Supabase PostgreSQL RPC `check_distributed_rate_limit` when available,
+ * with graceful in-memory fallback.
+ */
+export async function checkRateLimit(
+  identifier: string,
+  endpoint = 'api/leads',
+  maxRequests = 15,
+  windowSeconds = 60
+): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.rpc('check_distributed_rate_limit', {
+        p_client_key: identifier,
+        p_endpoint: endpoint,
+        p_max_requests: maxRequests,
+        p_window_seconds: windowSeconds,
+      });
+      if (!error && typeof data === 'boolean') {
+        return data;
+      }
+    } catch (e) {
+      // Fallback to local memory on connection issue
+    }
+  }
+
+  // Local fallback
   const now = Date.now();
-  const record = rateLimitMap.get(identifier);
+  const key = `${identifier}:${endpoint}`;
+  const record = inMemoryRateLimitMap.get(key);
 
   if (!record || now > record.expiresAt) {
-    rateLimitMap.set(identifier, { count: 1, expiresAt: now + windowMs });
+    inMemoryRateLimitMap.set(key, { count: 1, expiresAt: now + windowSeconds * 1000 });
     return true;
   }
 

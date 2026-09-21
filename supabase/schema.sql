@@ -9,6 +9,8 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ==============================================================================
 -- 1. TABLA: ORGANIZACIONES (Inmobiliarias)
+-- Nota: Solo accesible a miembros autenticados de la respectiva organización.
+-- Visitantes anónimos acceden exclusivamente a la vista 'public_organizations'.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.organizations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -30,9 +32,9 @@ CREATE TABLE IF NOT EXISTS public.organizations (
 -- ==============================================================================
 -- 2. TABLA: MIEMBROS DE ORGANIZACIÓN (Vínculo con Supabase Auth y Roles)
 -- Roles disponibles:
---   - 'owner': Control total de la inmobiliaria, gestión de miembros y facturación.
---   - 'admin': Gestión completa de inventario, prospectos y consulta de miembros.
---   - 'agent': Gestión operativa de inventario y prospectos (sin eliminación).
+--   - 'owner': Propietario de la inmobiliaria. Control total y nombramiento de roles.
+--   - 'admin': Administrador. Gestión de inventario, prospectos y miembros operativos.
+--   - 'agent': Asesor comercial. Gestión operativa de inventario y prospectos (sin eliminación).
 --   - 'viewer': Solo lectura sobre inventario y prospectos de su organización.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.organization_members (
@@ -72,16 +74,17 @@ CREATE TABLE IF NOT EXISTS public.properties (
     featured BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    CONSTRAINT uq_org_property_code UNIQUE (organization_id, code)
+    CONSTRAINT uq_org_property_code UNIQUE (organization_id, code),
+    CONSTRAINT uq_property_id_org UNIQUE (id, organization_id)
 );
 
 -- ==============================================================================
 -- 4. TABLA: DETALLES PRIVADOS DE PROPIEDADES (Datos Sensibles de Propietarios y CRM)
--- Separación física estricta para garantizar que la información confidencial nunca se exponga.
+-- Integridad referencial cruzada estricta: garantiza que property_id y organization_id coincidan.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.property_private_details (
-    property_id UUID PRIMARY KEY REFERENCES public.properties(id) ON DELETE CASCADE,
-    organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    property_id UUID PRIMARY KEY,
+    organization_id UUID NOT NULL,
     internal_address TEXT NOT NULL,
     owner_name VARCHAR(255),
     owner_phone VARCHAR(50),
@@ -90,7 +93,11 @@ CREATE TABLE IF NOT EXISTS public.property_private_details (
     private_notes TEXT,
     assigned_agent VARCHAR(150) DEFAULT 'Sin Asignar',
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_prop_private_details_compound 
+        FOREIGN KEY (property_id, organization_id) 
+        REFERENCES public.properties(id, organization_id) 
+        ON DELETE CASCADE
 );
 
 -- ==============================================================================
@@ -136,7 +143,19 @@ CREATE TABLE IF NOT EXISTS public.lead_activities (
 );
 
 -- ==============================================================================
--- 7. ÍNDICES DE ALTO RENDIMIENTO
+-- 7. TABLA: CONTROL DE TASA DISTRIBUIDO (Rate Limiting para Serverless / APIs Públicas)
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.api_rate_limits (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_key VARCHAR(255) NOT NULL,
+    endpoint VARCHAR(100) NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    request_count INT NOT NULL DEFAULT 1,
+    CONSTRAINT uq_client_endpoint UNIQUE (client_key, endpoint)
+);
+
+-- ==============================================================================
+-- 8. ÍNDICES DE ALTO RENDIMIENTO
 -- ==============================================================================
 CREATE INDEX IF NOT EXISTS idx_properties_org ON public.properties(organization_id);
 CREATE INDEX IF NOT EXISTS idx_properties_status ON public.properties(status);
@@ -148,11 +167,14 @@ CREATE INDEX IF NOT EXISTS idx_leads_contact_search ON public.leads(organization
 CREATE INDEX IF NOT EXISTS idx_lead_activities_lead ON public.lead_activities(lead_id);
 CREATE INDEX IF NOT EXISTS idx_org_members_user ON public.organization_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_org_members_org ON public.organization_members(organization_id);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON public.api_rate_limits(client_key, endpoint, window_start);
 
 -- ==============================================================================
--- 8. VISTA PÚBLICA SANITIZADA (Solo datos comerciales autorizados)
--- Con security_barrier para evitar ataques de canal lateral o filtración de planes de ejecución.
+-- 9. VISTAS PÚBLICAS SANITIZADAS (Exclusivas para visitantes anónimos)
+-- Construidas con security_barrier para evitar filtraciones de canales laterales.
 -- ==============================================================================
+
+-- 9.1 Catálogo público de inmuebles disponibles
 CREATE OR REPLACE VIEW public.public_properties WITH (security_barrier = true) AS
 SELECT
     id,
@@ -179,8 +201,23 @@ SELECT
 FROM public.properties
 WHERE status = 'disponible';
 
+-- 9.2 Perfil público comercial de inmobiliarias
+CREATE OR REPLACE VIEW public.public_organizations WITH (security_barrier = true) AS
+SELECT
+    id,
+    name,
+    slug,
+    phone,
+    email,
+    city,
+    logo_url,
+    currency,
+    ai_assistant_name,
+    ai_assistant_welcome_message
+FROM public.organizations;
+
 -- ==============================================================================
--- 9. FUNCIONES DE AUTORIZACIÓN Y SEGURIDAD MULTI-TENANT (RBAC)
+-- 10. FUNCIONES DE AUTORIZACIÓN Y SEGURIDAD MULTI-TENANT (RBAC)
 -- Todas las funciones usan search_path seguro para prevenir inyección de esquemas.
 -- ==============================================================================
 
@@ -252,6 +289,82 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
+-- Limitador de tasa distribuido para Serverless
+CREATE OR REPLACE FUNCTION public.check_distributed_rate_limit(
+    p_client_key TEXT,
+    p_endpoint TEXT,
+    p_max_requests INT DEFAULT 15,
+    p_window_seconds INT DEFAULT 60
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_now TIMESTAMPTZ := NOW();
+    v_window_start TIMESTAMPTZ;
+    v_count INT;
+BEGIN
+    SELECT window_start, request_count INTO v_window_start, v_count
+    FROM public.api_rate_limits
+    WHERE client_key = p_client_key AND endpoint = p_endpoint
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        INSERT INTO public.api_rate_limits (client_key, endpoint, window_start, request_count)
+        VALUES (p_client_key, p_endpoint, v_now, 1);
+        RETURN TRUE;
+    END IF;
+
+    IF v_now > (v_window_start + (p_window_seconds || ' seconds')::INTERVAL) THEN
+        UPDATE public.api_rate_limits
+        SET window_start = v_now, request_count = 1
+        WHERE client_key = p_client_key AND endpoint = p_endpoint;
+        RETURN TRUE;
+    END IF;
+
+    IF v_count >= p_max_requests THEN
+        RETURN FALSE;
+    END IF;
+
+    UPDATE public.api_rate_limits
+    SET request_count = request_count + 1
+    WHERE client_key = p_client_key AND endpoint = p_endpoint;
+
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- Trigger para garantizar integridad y evitar eliminación del último propietario
+CREATE OR REPLACE FUNCTION public.check_organization_owner_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+    owner_count INT;
+BEGIN
+    -- Si se intenta eliminar un propietario o cambiar su rol
+    IF (TG_OP = 'DELETE' AND OLD.role = 'owner') OR 
+       (TG_OP = 'UPDATE' AND OLD.role = 'owner' AND NEW.role <> 'owner') THEN
+        SELECT COUNT(*) INTO owner_count
+        FROM public.organization_members
+        WHERE organization_id = OLD.organization_id
+          AND role = 'owner'
+          AND id <> OLD.id;
+
+        IF owner_count = 0 THEN
+            RAISE EXCEPTION 'Operación denegada: Una organización debe conservar al menos un propietario (owner) activo.';
+        END IF;
+    END IF;
+
+    -- Impedir que un usuario modifique su propio rol
+    IF TG_OP = 'UPDATE' AND OLD.user_id = auth.uid() AND OLD.role <> NEW.role THEN
+        RAISE EXCEPTION 'Operación denegada: No está permitido modificar tu propio rol.';
+    END IF;
+
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+DROP TRIGGER IF EXISTS tr_org_members_owner_integrity ON public.organization_members;
+CREATE TRIGGER tr_org_members_owner_integrity
+BEFORE UPDATE OR DELETE ON public.organization_members
+FOR EACH ROW EXECUTE FUNCTION public.check_organization_owner_integrity();
+
 -- Trigger para actualizar updated_at automáticamente
 CREATE OR REPLACE FUNCTION public.handle_updated_at()
 RETURNS TRIGGER AS $$
@@ -260,6 +373,11 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SET search_path = public, pg_temp;
+
+DROP TRIGGER IF EXISTS tr_organizations_updated_at ON public.organizations;
+CREATE TRIGGER tr_organizations_updated_at
+BEFORE UPDATE ON public.organizations
+FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 DROP TRIGGER IF EXISTS tr_properties_updated_at ON public.properties;
 CREATE TRIGGER tr_properties_updated_at
@@ -277,7 +395,7 @@ BEFORE UPDATE ON public.leads
 FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 -- ==============================================================================
--- 10. POLÍTICAS DE ROW LEVEL SECURITY (RLS) GRANULARES POR ROL
+-- 11. POLÍTICAS DE ROW LEVEL SECURITY (RLS)
 -- ==============================================================================
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
@@ -285,12 +403,15 @@ ALTER TABLE public.properties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.property_private_details ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.lead_activities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.api_rate_limits ENABLE ROW LEVEL SECURITY;
 
--- 10.1 ORGANIZACIONES
-DROP POLICY IF EXISTS "Public can view organization public profile" ON public.organizations;
-CREATE POLICY "Public can view organization public profile"
+-- 11.1 ORGANIZACIONES
+-- Consulta completa restringida exclusivamente a miembros autenticados de esa organización
+DROP POLICY IF EXISTS "Org members can view their organization full profile" ON public.organizations;
+CREATE POLICY "Org members can view their organization full profile"
 ON public.organizations FOR SELECT
-USING (true);
+TO authenticated
+USING (public.is_org_member(id));
 
 DROP POLICY IF EXISTS "Org owner can update organization" ON public.organizations;
 CREATE POLICY "Org owner can update organization"
@@ -298,34 +419,45 @@ ON public.organizations FOR UPDATE
 TO authenticated
 USING (public.has_org_role(id, ARRAY['owner']));
 
--- 10.2 MIEMBROS DE ORGANIZACIÓN
+-- 11.2 MIEMBROS DE ORGANIZACIÓN (Control estricto contra escalamiento de privilegios)
 DROP POLICY IF EXISTS "Org members can view member list" ON public.organization_members;
 CREATE POLICY "Org members can view member list"
 ON public.organization_members FOR SELECT
 TO authenticated
 USING (public.is_org_member(organization_id));
 
-DROP POLICY IF EXISTS "Org owner or admin can add members" ON public.organization_members;
-CREATE POLICY "Org owner or admin can add members"
+-- Solo el owner puede nombrar a cualquier rol (incluido otro owner)
+DROP POLICY IF EXISTS "Org owner can add any members" ON public.organization_members;
+CREATE POLICY "Org owner can add any members"
 ON public.organization_members FOR INSERT
 TO authenticated
-WITH CHECK (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
+WITH CHECK (public.has_org_role(organization_id, ARRAY['owner']));
 
+-- Un admin solo puede agregar miembros operativos ('admin', 'agent', 'viewer'). NUNCA 'owner'.
+DROP POLICY IF EXISTS "Org admin can add operational members" ON public.organization_members;
+CREATE POLICY "Org admin can add operational members"
+ON public.organization_members FOR INSERT
+TO authenticated
+WITH CHECK (
+    public.has_org_role(organization_id, ARRAY['admin'])
+    AND role IN ('admin', 'agent', 'viewer')
+);
+
+-- Solo el owner puede cambiar roles
 DROP POLICY IF EXISTS "Org owner can update member roles" ON public.organization_members;
 CREATE POLICY "Org owner can update member roles"
 ON public.organization_members FOR UPDATE
 TO authenticated
 USING (public.has_org_role(organization_id, ARRAY['owner']));
 
+-- Solo el owner puede expulsar miembros
 DROP POLICY IF EXISTS "Org owner can remove members" ON public.organization_members;
 CREATE POLICY "Org owner can remove members"
 ON public.organization_members FOR DELETE
 TO authenticated
 USING (public.has_org_role(organization_id, ARRAY['owner']));
 
--- 10.3 PROPIEDADES (INVENTARIO GENERAL)
--- NOTA CRÍTICA: No existe política SELECT para 'anon' en la tabla base.
--- Los visitantes anónimos solo leen de public.public_properties.
+-- 11.3 PROPIEDADES (INVENTARIO GENERAL)
 DROP POLICY IF EXISTS "Org members can view their properties" ON public.properties;
 CREATE POLICY "Org members can view their properties"
 ON public.properties FOR SELECT
@@ -350,7 +482,7 @@ ON public.properties FOR DELETE
 TO authenticated
 USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
--- 10.4 DETALLES PRIVADOS DE PROPIEDADES
+-- 11.4 DETALLES PRIVADOS DE PROPIEDADES
 DROP POLICY IF EXISTS "Authorized members can view private details" ON public.property_private_details;
 CREATE POLICY "Authorized members can view private details"
 ON public.property_private_details FOR SELECT
@@ -375,9 +507,7 @@ ON public.property_private_details FOR DELETE
 TO authenticated
 USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
--- 10.5 PROSPECTOS (LEADS)
--- NOTA CRÍTICA: Se revoca inserción y consulta anónima directa.
--- La captación pública se procesa a través del endpoint seguro del servidor.
+-- 11.5 PROSPECTOS (LEADS)
 DROP POLICY IF EXISTS "Org members can view their leads" ON public.leads;
 CREATE POLICY "Org members can view their leads"
 ON public.leads FOR SELECT
@@ -402,7 +532,7 @@ ON public.leads FOR DELETE
 TO authenticated
 USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
--- 10.6 ACTIVIDADES DE PROSPECTOS
+-- 11.6 ACTIVIDADES DE PROSPECTOS
 DROP POLICY IF EXISTS "Org members can view lead activities" ON public.lead_activities;
 CREATE POLICY "Org members can view lead activities"
 ON public.lead_activities FOR SELECT
@@ -423,27 +553,37 @@ WITH CHECK (EXISTS (
     AND public.has_org_role(leads.organization_id, ARRAY['owner', 'admin', 'agent'])
 ));
 
+-- 11.7 CONTROL DE RATE LIMITING (Solo accesible por el backend/funciones del sistema)
+DROP POLICY IF EXISTS "System access only on rate limits" ON public.api_rate_limits;
+CREATE POLICY "System access only on rate limits"
+ON public.api_rate_limits FOR ALL
+TO authenticated
+USING (true);
+
 -- ==============================================================================
--- 11. PERMISOS DE ACCESO PARA ROLES DE SUPABASE (anon / authenticated)
--- Principio de mínimo privilegio: 'anon' no tiene permisos directos sobre tablas privadas.
+-- 12. PERMISOS DE ACCESO PARA ROLES DE SUPABASE (anon / authenticated)
+-- Principio de mínimo privilegio estricto: 'anon' nunca accede a tablas base.
 -- ==============================================================================
+REVOKE ALL ON public.organizations FROM anon;
 REVOKE ALL ON public.properties FROM anon;
 REVOKE ALL ON public.property_private_details FROM anon;
 REVOKE ALL ON public.leads FROM anon;
 REVOKE ALL ON public.lead_activities FROM anon;
 REVOKE ALL ON public.organization_members FROM anon;
+REVOKE ALL ON public.api_rate_limits FROM anon;
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, service_role;
 
--- Permisos públicos autorizados para 'anon'
+-- Permisos públicos autorizados para 'anon' exclusivamente sobre vistas sanitizadas
 GRANT SELECT ON public.public_properties TO anon;
-GRANT SELECT ON public.organizations TO anon;
+GRANT SELECT ON public.public_organizations TO anon;
 
--- Permisos para usuarios autenticados (filtrados por las políticas RLS anteriores)
+-- Permisos para usuarios autenticados (filtrados por las políticas RLS)
 GRANT SELECT ON public.public_properties TO authenticated;
+GRANT SELECT ON public.public_organizations TO authenticated;
 GRANT SELECT, UPDATE ON public.organizations TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.properties TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.property_private_details TO authenticated;
@@ -456,3 +596,4 @@ GRANT EXECUTE ON FUNCTION public.is_org_member(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO anon, authenticated;

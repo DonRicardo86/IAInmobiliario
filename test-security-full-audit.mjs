@@ -101,13 +101,14 @@ async function runAudit() {
   assert(resNoConsent.status === 400, 'Rechazo inmediato por falta de Habeas Data con HTTP 400');
 
   // 2.2 Captación pública válida con Habeas Data
+  const dynamicEmail = `carlos.montoya.${Date.now()}@testaudit.com`;
   const resValidLead = await fetch(`${BASE_URL}/api/leads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       name: 'Carlos Montoya Seguro',
-      phone: '+57 310 998 8776',
-      email: 'carlos.montoya.audit@gmail.com',
+      phone: `+57 310 ${Date.now().toString().slice(-7)}`,
+      email: dynamicEmail,
       operationType: 'compra',
       propertyType: 'apartamento',
       municipality: 'Medellín',
