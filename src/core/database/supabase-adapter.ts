@@ -574,8 +574,219 @@ export class UnifiedDataService {
     return ServerStore.findDuplicateLead(email, phone, organizationId);
   }
 
+  static async createPublicLead(
+    leadData: {
+      organizationId: string;
+      name: string;
+      phone: string;
+      email: string;
+      operationType?: 'compra' | 'arriendo';
+      propertyType?: string;
+      municipality?: string;
+      zone?: string;
+      budget?: number;
+      interestedPropertyIds?: string[];
+      notes?: string;
+      consentHabeasData?: boolean;
+      source?: string;
+    },
+    clientIp = 'web'
+  ): Promise<{ success: boolean; leadId?: string; isDuplicate?: boolean; message: string }> {
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+    const adminSupabase = getSupabaseAdminClient();
+    const anonSupabase = getSupabaseAnonClient();
+
+    // 1. Validaciones obligatorias de servidor
+    if (!leadData.name?.trim() || !leadData.phone?.trim() || !leadData.email?.trim()) {
+      throw new Error('Los datos de contacto (nombre, teléfono y correo electrónico) son obligatorios.');
+    }
+    if (leadData.consentHabeasData === false) {
+      throw new Error('Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data Ley 1581 de 2012).');
+    }
+
+    const cleanEmail = leadData.email.trim().toLowerCase();
+    const cleanPhone = leadData.phone.trim();
+    const cleanName = leadData.name.trim();
+
+    // Prioridad 1: Si SUPABASE_SERVICE_ROLE_KEY está configurada en Vercel, usar cliente administrativo del servidor
+    if (adminSupabase) {
+      try {
+        // Detección de duplicados en la misma organización
+        const { data: existingLead } = await adminSupabase
+          .from('leads')
+          .select('id')
+          .eq('organization_id', leadData.organizationId)
+          .or(`email.eq.${cleanEmail},phone.eq.${cleanPhone}`)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (existingLead) {
+          await adminSupabase.from('lead_activities').insert({
+            lead_id: existingLead.id,
+            description: `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${(leadData.interestedPropertyIds || []).join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
+            type: 'contact_attempt',
+            author: 'Asistente SofIA',
+          });
+
+          return {
+            success: true,
+            leadId: existingLead.id,
+            isDuplicate: true,
+            message: 'Solicitud actualizada para el prospecto existente en el CRM.',
+          };
+        }
+
+        const payload = this.mapDomainLeadToSupabase({
+          organizationId: leadData.organizationId,
+          name: cleanName,
+          phone: cleanPhone,
+          email: cleanEmail,
+          operationType: leadData.operationType || 'compra',
+          propertyType: leadData.propertyType || 'apartamento',
+          municipality: leadData.municipality || 'Medellín',
+          zone: leadData.zone || 'El Poblado',
+          budget: Number(leadData.budget) || 0,
+          currency: 'COP',
+          desiredFeatures: [],
+          interestedPropertyIds: leadData.interestedPropertyIds || [],
+          notes: leadData.notes || '',
+          status: 'nuevo',
+          priority: 'alto',
+          source: leadData.source || 'asistente_ia',
+          assignedAgent: 'Por Asignar',
+          consentHabeasData: true,
+        });
+
+        const { data, error } = await adminSupabase
+          .from('leads')
+          .insert(payload)
+          .select('id')
+          .single();
+
+        if (error) {
+          console.error('[SupabaseAdapter] Admin lead insertion error:', error);
+          if (isProduction) {
+            throw new Error(`Error en base de datos al registrar prospecto: ${error.message}`);
+          }
+        }
+
+        if (data) {
+          await adminSupabase.from('lead_activities').insert({
+            lead_id: data.id,
+            description: `Prospecto captado exitosamente mediante ${leadData.source || 'asistente_ia'}. Autorización Habeas Data verificada.`,
+            type: 'created',
+            author: 'Sistema IA',
+          });
+
+          return {
+            success: true,
+            leadId: data.id,
+            isDuplicate: false,
+            message: 'Prospecto creado exitosamente en el CRM.',
+          };
+        }
+      } catch (err: any) {
+        console.error('[SupabaseAdapter] Exception in admin createPublicLead:', err);
+        if (isProduction && !anonSupabase) {
+          throw new Error(err.message || 'Error al persistir prospecto en Supabase.');
+        }
+      }
+    }
+
+    // Prioridad 2: Si no hay clave admin configurada o se utiliza el procedimiento de privilegio mínimo, invocar capture_public_lead RPC
+    if (anonSupabase) {
+      try {
+        const { data, error } = await anonSupabase.rpc('capture_public_lead', {
+          p_organization_id: leadData.organizationId,
+          p_name: cleanName,
+          p_phone: cleanPhone,
+          p_email: cleanEmail,
+          p_operation_type: leadData.operationType || 'compra',
+          p_property_type: leadData.propertyType || 'apartamento',
+          p_municipality: leadData.municipality || 'Medellín',
+          p_zone: leadData.zone || 'El Poblado',
+          p_budget: Number(leadData.budget) || 0,
+          p_interested_property_ids: leadData.interestedPropertyIds || [],
+          p_notes: leadData.notes || '',
+          p_consent_habeas_data: true,
+          p_source: leadData.source || 'asistente_ia',
+          p_client_ip: clientIp,
+        });
+
+        if (error) {
+          console.error('[SupabaseAdapter] capture_public_lead RPC error:', error);
+          if (isProduction) {
+            throw new Error(`Error al registrar prospecto en Supabase: ${error.message}`);
+          }
+        }
+
+        if (data && typeof data === 'object') {
+          return {
+            success: data.success ?? true,
+            leadId: data.lead_id,
+            isDuplicate: data.is_duplicate,
+            message: data.message || 'Prospecto registrado exitosamente en Supabase.',
+          };
+        }
+      } catch (err: any) {
+        console.error('[SupabaseAdapter] Exception calling capture_public_lead RPC:', err);
+        if (isProduction) {
+          throw new Error(err.message || 'Error en el procedimiento de captación pública de Supabase.');
+        }
+      }
+    }
+
+    // Prioridad 3: Modo local / Demostración en memoria
+    if (isProduction) {
+      throw new Error('No se pudo establecer conexión segura con Supabase para registrar el prospecto.');
+    }
+
+    const existingMemoryLead = await ServerStore.findDuplicateLead(cleanEmail, cleanPhone, leadData.organizationId);
+    if (existingMemoryLead) {
+      await ServerStore.addLeadActivity(
+        existingMemoryLead.id,
+        `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${(leadData.interestedPropertyIds || []).join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
+        'contact_attempt',
+        'Asistente SofIA'
+      );
+      return {
+        success: true,
+        leadId: existingMemoryLead.id,
+        isDuplicate: true,
+        message: 'Solicitud actualizada para el prospecto existente en memoria local (Modo Demo).',
+      };
+    }
+
+    const memoryLead = await ServerStore.createLead({
+      organizationId: leadData.organizationId,
+      name: cleanName,
+      phone: cleanPhone,
+      email: cleanEmail,
+      operationType: leadData.operationType || 'compra',
+      propertyType: (leadData.propertyType as any) || 'apartamento',
+      municipality: leadData.municipality || 'Medellín',
+      zone: leadData.zone || 'El Poblado',
+      budget: Number(leadData.budget) || 0,
+      currency: 'COP',
+      desiredFeatures: [],
+      interestedPropertyIds: leadData.interestedPropertyIds || [],
+      notes: leadData.notes || '',
+      status: 'nuevo',
+      priority: 'alto',
+      source: (leadData.source as any) || 'asistente_ia',
+      consentHabeasData: true,
+    });
+
+    return {
+      success: true,
+      leadId: memoryLead.id,
+      isDuplicate: false,
+      message: 'Prospecto registrado exitosamente en memoria local (Modo Demo).',
+    };
+  }
+
   static async createLead(leadData: CreateLeadInput, authToken?: string): Promise<Lead> {
-    const supabase = getSupabaseClient(authToken);
     const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
     const targetOrgId = leadData.organizationId || DEFAULT_ORGANIZATION.id;
     const payloadWithDefaults = {
@@ -584,20 +795,50 @@ export class UnifiedDataService {
       currency: leadData.currency || 'COP',
     };
 
-    if (supabase) {
+    // If authenticated: use authenticated user client with JWT
+    if (authToken) {
+      const userSupabase = getSupabaseUserClient(authToken);
+      if (userSupabase) {
+        const payload = this.mapDomainLeadToSupabase(payloadWithDefaults);
+        const { data, error } = await userSupabase
+          .from('leads')
+          .insert(payload)
+          .select()
+          .single();
+        if (error) {
+          console.error('[SupabaseAdapter] Create lead error for authenticated user:', error);
+          throw new Error(`Error al registrar prospecto en Supabase: ${error.message}`);
+        }
+        if (data) {
+          if (leadData.notes) {
+            await userSupabase.from('lead_activities').insert({
+              lead_id: data.id,
+              description: `Prospecto registrado: ${leadData.notes}`,
+              type: 'created',
+              author: leadData.assignedAgent || 'Asesor',
+            });
+          }
+          return this.mapSupabaseLeadToDomain({ ...data, lead_activities: [] });
+        }
+      }
+    }
+
+    // If admin key available: use admin client
+    const adminSupabase = getSupabaseAdminClient();
+    if (adminSupabase) {
       const payload = this.mapDomainLeadToSupabase(payloadWithDefaults);
-      const { data, error } = await supabase
+      const { data, error } = await adminSupabase
         .from('leads')
         .insert(payload)
         .select()
         .single();
       if (error) {
-        console.error('[SupabaseAdapter] Create lead error in Supabase:', error);
+        console.error('[SupabaseAdapter] Create lead error with admin client:', error);
         throw new Error(`Error al registrar prospecto en Supabase: ${error.message}`);
       }
       if (data) {
         if (leadData.notes) {
-          await supabase.from('lead_activities').insert({
+          await adminSupabase.from('lead_activities').insert({
             lead_id: data.id,
             description: `Prospecto registrado: ${leadData.notes}`,
             type: 'created',
@@ -606,6 +847,49 @@ export class UnifiedDataService {
         }
         return this.mapSupabaseLeadToDomain({ ...data, lead_activities: [] });
       }
+    }
+
+    // If unauthenticated public request: route through secure createPublicLead
+    if (!authToken) {
+      const publicResult = await this.createPublicLead({
+        organizationId: targetOrgId,
+        name: leadData.name,
+        phone: leadData.phone,
+        email: leadData.email,
+        operationType: leadData.operationType,
+        propertyType: leadData.propertyType,
+        municipality: leadData.municipality,
+        zone: leadData.zone,
+        budget: leadData.budget,
+        interestedPropertyIds: leadData.interestedPropertyIds,
+        notes: leadData.notes,
+        consentHabeasData: leadData.consentHabeasData,
+        source: leadData.source,
+      });
+
+      return {
+        id: publicResult.leadId || `lead-${Date.now()}`,
+        organizationId: targetOrgId,
+        name: leadData.name,
+        phone: leadData.phone,
+        email: leadData.email,
+        operationType: leadData.operationType || 'compra',
+        propertyType: leadData.propertyType || 'apartamento',
+        municipality: leadData.municipality || 'Medellín',
+        zone: leadData.zone || 'El Poblado',
+        budget: leadData.budget || 0,
+        currency: 'COP',
+        desiredFeatures: [],
+        interestedPropertyIds: leadData.interestedPropertyIds || [],
+        notes: leadData.notes || '',
+        status: 'nuevo',
+        priority: 'alto',
+        activities: [],
+        source: (leadData.source as any) || 'asistente_ia',
+        consentHabeasData: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
     }
 
     if (isProduction) {

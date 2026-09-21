@@ -331,6 +331,151 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
+-- ==============================================================================
+-- Captación Pública Segura de Prospectos (SofIA / Web)
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.capture_public_lead(
+    p_organization_id UUID,
+    p_name VARCHAR,
+    p_phone VARCHAR,
+    p_email VARCHAR,
+    p_operation_type VARCHAR DEFAULT 'compra',
+    p_property_type VARCHAR DEFAULT 'apartamento',
+    p_municipality VARCHAR DEFAULT 'Medellín',
+    p_zone VARCHAR DEFAULT 'El Poblado',
+    p_budget NUMERIC DEFAULT 0,
+    p_interested_property_ids TEXT[] DEFAULT '{}',
+    p_notes TEXT DEFAULT '',
+    p_consent_habeas_data BOOLEAN DEFAULT true,
+    p_source VARCHAR DEFAULT 'asistente_ia',
+    p_client_ip TEXT DEFAULT 'web'
+)
+RETURNS JSON AS $$
+DECLARE
+    v_org_id UUID;
+    v_org_name VARCHAR;
+    v_name VARCHAR;
+    v_phone VARCHAR;
+    v_email VARCHAR;
+    v_existing_lead_id UUID;
+    v_new_lead_id UUID;
+BEGIN
+    -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
+    IF p_consent_habeas_data IS NOT TRUE THEN
+        RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data).'
+            USING ERRCODE = '22000';
+    END IF;
+
+    -- 2. Validar datos mínimos obligatorios
+    v_name := TRIM(COALESCE(p_name, ''));
+    v_phone := TRIM(COALESCE(p_phone, ''));
+    v_email := LOWER(TRIM(COALESCE(p_email, '')));
+
+    IF v_name = '' OR v_phone = '' OR v_email = '' THEN
+        RAISE EXCEPTION 'Los datos de contacto (nombre, teléfono y correo electrónico) son obligatorios.'
+            USING ERRCODE = '22000';
+    END IF;
+
+    -- 3. Validar existencia de la organización receptora en public.organizations
+    SELECT id, name INTO v_org_id, v_org_name
+    FROM public.organizations
+    WHERE id = p_organization_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'La organización receptora especificada no existe en el sistema.'
+            USING ERRCODE = '22000';
+    END IF;
+
+    -- 4. Detección de duplicados para la misma organización (por correo o teléfono)
+    SELECT id INTO v_existing_lead_id
+    FROM public.leads
+    WHERE organization_id = p_organization_id
+      AND (LOWER(TRIM(email)) = v_email OR TRIM(phone) = v_phone)
+    ORDER BY created_at DESC
+    LIMIT 1;
+
+    IF v_existing_lead_id IS NOT NULL THEN
+        -- Registrar nueva interacción en el historial del prospecto existente
+        INSERT INTO public.lead_activities (lead_id, description, type, author)
+        VALUES (
+            v_existing_lead_id,
+            'Nueva solicitud registrada desde ' || COALESCE(p_source, 'asistente_ia') || '. Inmuebles: ' || 
+            CASE WHEN array_length(p_interested_property_ids, 1) > 0 THEN array_to_string(p_interested_property_ids, ', ') ELSE 'Búsqueda general' END || 
+            '. Notas: ' || COALESCE(p_notes, 'Consulta web recurrente'),
+            'contact_attempt',
+            'Asistente SofIA'
+        );
+
+        RETURN json_build_object(
+            'success', true,
+            'lead_id', v_existing_lead_id,
+            'is_duplicate', true,
+            'organization_id', p_organization_id,
+            'message', 'Solicitud actualizada para el prospecto existente en ' || v_org_name || '.'
+        );
+    END IF;
+
+    -- 5. Inserción protegida de nuevo prospecto
+    INSERT INTO public.leads (
+        organization_id,
+        name,
+        phone,
+        email,
+        operation_type,
+        property_type,
+        municipality,
+        zone,
+        budget,
+        currency,
+        desired_features,
+        interested_property_ids,
+        notes,
+        status,
+        priority,
+        source,
+        assigned_agent,
+        consent_habeas_data
+    ) VALUES (
+        p_organization_id,
+        v_name,
+        v_phone,
+        v_email,
+        COALESCE(p_operation_type, 'compra'),
+        COALESCE(p_property_type, 'apartamento'),
+        COALESCE(p_municipality, 'Medellín'),
+        COALESCE(p_zone, 'El Poblado'),
+        COALESCE(p_budget, 0),
+        'COP',
+        ARRAY[]::TEXT[],
+        COALESCE(p_interested_property_ids, ARRAY[]::TEXT[]),
+        COALESCE(p_notes, ''),
+        'nuevo',
+        'alto',
+        COALESCE(p_source, 'asistente_ia'),
+        'Por Asignar',
+        true
+    )
+    RETURNING id INTO v_new_lead_id;
+
+    -- 6. Registrar actividad inicial
+    INSERT INTO public.lead_activities (lead_id, description, type, author)
+    VALUES (
+        v_new_lead_id,
+        'Prospecto captado exitosamente mediante ' || COALESCE(p_source, 'asistente_ia') || ' (' || v_org_name || '). Autorización Habeas Data verificada.',
+        'created',
+        'Sistema IA'
+    );
+
+    RETURN json_build_object(
+        'success', true,
+        'lead_id', v_new_lead_id,
+        'is_duplicate', false,
+        'organization_id', p_organization_id,
+        'message', 'Prospecto creado exitosamente en el CRM de ' || v_org_name || '.'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
 -- Trigger para garantizar integridad y evitar eliminación del último propietario
 CREATE OR REPLACE FUNCTION public.check_organization_owner_integrity()
 RETURNS TRIGGER AS $$
@@ -593,6 +738,7 @@ GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated,
 GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO anon, authenticated, service_role;
 
 -- Revocación de privilegios automáticos por defecto en PostgreSQL para funciones futuras
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon;

@@ -64,13 +64,18 @@ export async function GET(req: NextRequest) {
   }
 }
 
+const FALLBACK_CONTACT = {
+  whatsapp: '+57 304 360 5155',
+  email: 'agenteinmobiliaria1986@gmail.com',
+};
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const authSession = await authenticateAdminRequest(req);
     const authHeader = req.headers.get('authorization') || undefined;
 
-    // If authenticated: enforce RBAC role permissions
+    // 1. If authenticated: enforce RBAC role permissions
     if (authSession) {
       if (!hasRequiredRole(authSession, ['owner', 'admin', 'agent'])) {
         return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para crear prospectos.');
@@ -84,7 +89,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Protection & strict validation
+    // 2. Protection & strict validation
     if (!body.name?.trim()) {
       return NextResponse.json({ success: false, error: 'El nombre es obligatorio' }, { status: 400 });
     }
@@ -98,7 +103,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Determine target organization safely
+    // 3. Determine target organization safely on the server
     let targetOrgId = DEFAULT_ORGANIZATION.id;
     if (authSession) {
       targetOrgId = authSession.organizationId;
@@ -110,38 +115,85 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Check duplicate
-    if (body.email || body.phone) {
-      const existing = await UnifiedDataService.findDuplicateLead(body.email || '', body.phone || '', targetOrgId, authHeader);
-      if (existing && !body.allowDuplicate) {
-        const updated = await UnifiedDataService.addLeadActivity(
-          existing.id,
-          `Nueva interacción registrada desde captación web. Notas: ${body.notes || 'Consulta recurrente'}`,
-          'contact_attempt',
-          'Sistema',
-          authHeader
-        );
-        return NextResponse.json(
-          {
-            success: true,
-            lead: updated,
-            duplicateDetected: true,
-            demoMode: !authSession,
-          },
-          { status: 200 }
-        );
+    // 4. Authenticated CRM creation path
+    if (authSession) {
+      // Check duplicate
+      if (body.email || body.phone) {
+        const existing = await UnifiedDataService.findDuplicateLead(body.email || '', body.phone || '', targetOrgId, authHeader);
+        if (existing && !body.allowDuplicate) {
+          const updated = await UnifiedDataService.addLeadActivity(
+            existing.id,
+            `Nueva interacción registrada desde panel CRM. Notas: ${body.notes || 'Registro manual'}`,
+            'contact_attempt',
+            'Asesor',
+            authHeader
+          );
+          return NextResponse.json(
+            {
+              success: true,
+              lead: updated,
+              duplicateDetected: true,
+              demoMode: false,
+            },
+            { status: 200 }
+          );
+        }
       }
+
+      const newLead = await UnifiedDataService.createLead(
+        {
+          ...body,
+          organizationId: targetOrgId,
+          consentHabeasData: body.consentHabeasData !== false,
+          source: body.source || 'manual',
+        },
+        authHeader
+      );
+
+      return NextResponse.json({ success: true, lead: newLead, demoMode: false }, { status: 201 });
     }
 
-    const newLead = await UnifiedDataService.createLead({
-      ...body,
-      organizationId: targetOrgId,
-      consentHabeasData: body.consentHabeasData !== false,
-      source: body.source || (authSession ? 'manual' : 'web_form'),
-    }, authHeader);
+    // 5. Unauthenticated public capture path (sanitized, no administrative privilege escalations)
+    const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+    const publicResult = await UnifiedDataService.createPublicLead(
+      {
+        organizationId: targetOrgId,
+        name: body.name.trim(),
+        phone: body.phone.trim(),
+        email: (body.email || '').trim().toLowerCase(),
+        operationType: body.operationType || 'compra',
+        propertyType: body.propertyType || 'apartamento',
+        municipality: body.municipality || 'Medellín',
+        zone: body.zone || 'El Poblado',
+        budget: Number(body.budget) || 0,
+        interestedPropertyIds: Array.isArray(body.interestedPropertyIds) ? body.interestedPropertyIds : [],
+        notes: body.notes || 'Captación desde formulario web',
+        consentHabeasData: true,
+        source: 'web_form',
+      },
+      clientIp
+    );
 
-    return NextResponse.json({ success: true, lead: newLead, demoMode: !authSession }, { status: 201 });
+    return NextResponse.json(
+      {
+        success: true,
+        leadId: publicResult.leadId,
+        duplicateDetected: publicResult.isDuplicate,
+        message: publicResult.message,
+        demoMode: false,
+      },
+      { status: 201 }
+    );
   } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+    console.error('[LeadsRoute] Error in POST /api/leads:', error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: error.message || 'No fue posible registrar la solicitud en este momento.',
+        message: `No fue posible registrar la solicitud en el CRM. Puedes contactarnos directamente vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
+        fallbackContact: FALLBACK_CONTACT,
+      },
+      { status: 400 }
+    );
   }
 }

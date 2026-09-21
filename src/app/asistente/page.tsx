@@ -210,7 +210,7 @@ function AsistenteIAContent() {
       return;
     }
     if (!leadConsent) {
-      showToast('Debe autorizar el tratamiento de datos personales.', 'error');
+      showToast('Debe autorizar el tratamiento de datos personales (Habeas Data).', 'error');
       return;
     }
 
@@ -236,6 +236,9 @@ function AsistenteIAContent() {
       if (data.success) {
         setLeadSuccess(true);
         setShowLeadForm(false);
+        setLeadName('');
+        setLeadPhone('');
+        setLeadEmail('');
         showToast('¡Solicitud registrada con éxito en el CRM!', 'success');
 
         setMessages((prev) => [
@@ -243,16 +246,35 @@ function AsistenteIAContent() {
           {
             id: `bot-lead-${Date.now()}`,
             sender: 'bot',
-            text: data.message,
+            text: data.message || `¡Muchas gracias! Hemos recibido tus datos y un asesor se comunicará contigo pronto.`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ]);
       } else {
-        showToast(data.error || 'Error al registrar solicitud', 'error');
+        const errorMsg = data.message || data.error || 'No fue posible registrar la solicitud en este momento.';
+        showToast(errorMsg, 'error');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-err-${Date.now()}`,
+            sender: 'bot',
+            text: `⚠️ No fue posible registrar automáticamente tu solicitud en este momento.\n\nPuedes contactarnos directamente para atenderte de inmediato:\n• **WhatsApp:** +57 304 360 5155\n• **Correo:** agenteinmobiliaria1986@gmail.com`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
       }
     } catch (e: any) {
-      console.error(e);
-      showToast('Error al enviar datos', 'error');
+      console.error('Error submitting lead form:', e);
+      showToast('Error de conexión con el servidor', 'error');
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `bot-err-${Date.now()}`,
+          sender: 'bot',
+          text: `⚠️ Hubo un inconveniente de conexión. Por favor comunícate directamente con nuestro equipo comercial:\n• **WhatsApp:** +57 304 360 5155\n• **Correo:** agenteinmobiliaria1986@gmail.com`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
     } finally {
       setSubmittingLead(false);
     }

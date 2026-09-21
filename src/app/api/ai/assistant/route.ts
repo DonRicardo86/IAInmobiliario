@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
 import { PropertyPublicView } from '@/core/types/property';
+import { checkRateLimit, rateLimitResponse } from '@/core/auth/auth-guard';
+
+const FALLBACK_CONTACT = {
+  whatsapp: '+57 304 360 5155',
+  email: 'agenteinmobiliaria1986@gmail.com',
+};
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,63 +29,87 @@ export async function POST(req: NextRequest) {
 
     // 2. Direct lead capture request from the assistant
     if (leadCapture) {
+      const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+      const isAllowed = await checkRateLimit(clientIp, 'api/ai/assistant/lead', 15, 60);
+      if (!isAllowed) {
+        return rateLimitResponse('Has enviado demasiadas solicitudes. Por favor espera un momento antes de reintentar.');
+      }
+
       const { name, phone, email, criteria, propertyIds, notes, consentHabeasData } = leadCapture;
+
+      // Validate required fields
       if (!name?.trim() || !phone?.trim() || !email?.trim()) {
         return NextResponse.json(
-          { success: false, error: 'Faltan datos de contacto obligatorios (nombre, teléfono y correo).' },
-          { status: 400 }
-        );
-      }
-      if (!consentHabeasData) {
-        return NextResponse.json(
-          { success: false, error: 'Se requiere la autorización expresa de tratamiento de datos personales según la Ley 1581 de 2012 (Habeas Data).' },
+          { success: false, error: 'Los datos de contacto (nombre, teléfono y correo) son obligatorios.' },
           { status: 400 }
         );
       }
 
-      // Check duplicate
-      const existingLead = await UnifiedDataService.findDuplicateLead(email.trim(), phone.trim(), targetOrgId);
-      if (existingLead) {
-        await UnifiedDataService.addLeadActivity(
-          existingLead.id,
-          `Nueva consulta desde SofIA Web (${org.name}). Inmuebles: ${(propertyIds || []).join(', ') || 'Búsqueda general'}. Notas: ${notes || 'Consulta reiterada'}`,
-          'contact_attempt',
-          org.aiAssistantName
+      // Validate Habeas Data consent
+      if (!consentHabeasData) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Se requiere la autorización expresa de tratamiento de datos personales según la Ley 1581 de 2012 (Habeas Data).',
+          },
+          { status: 400 }
         );
+      }
+
+      // Collect and verify interested property codes/ids
+      let verifiedPropertyIds: string[] = Array.isArray(propertyIds) ? [...propertyIds] : [];
+      if (criteria?.activePropertyCode && !verifiedPropertyIds.includes(criteria.activePropertyCode)) {
+        verifiedPropertyIds.push(criteria.activePropertyCode);
+      }
+
+      try {
+        const result = await UnifiedDataService.createPublicLead(
+          {
+            organizationId: targetOrgId,
+            name: name.trim(),
+            phone: phone.trim(),
+            email: email.trim(),
+            operationType: criteria?.operation || 'compra',
+            propertyType: criteria?.propertyType || 'apartamento',
+            municipality: criteria?.municipality || org.city || 'Medellín',
+            zone: criteria?.zone || 'El Poblado',
+            budget: criteria?.maxBudget || (criteria?.activeProperty?.priceCOP ? criteria.activeProperty.priceCOP : 800000000),
+            interestedPropertyIds: verifiedPropertyIds,
+            notes: `Captado por ${org.aiAssistantName} (${org.name}). Requerimiento: ${notes || 'Consulta de propiedades'}. Inmuebles de interés: ${verifiedPropertyIds.join(', ') || 'General'}. Criterios: ${JSON.stringify(criteria || {})}`,
+            consentHabeasData: true,
+            source: 'asistente_ia',
+          },
+          clientIp
+        );
+
+        if (result.isDuplicate) {
+          return NextResponse.json({
+            success: true,
+            leadCreated: false,
+            leadUpdated: true,
+            leadId: result.leadId,
+            message: `¡Hola de nuevo, ${name.trim()}! Hemos actualizado tu requerimiento en el sistema comercial de ${org.name}. Un asesor se comunicará contigo al ${phone} a la brevedad.`,
+          });
+        }
 
         return NextResponse.json({
           success: true,
-          leadCreated: false,
-          leadUpdated: true,
-          leadId: existingLead.id,
-          message: `¡Hola de nuevo, ${name.trim()}! Hemos actualizado tu requerimiento en el sistema comercial de ${org.name}. Un asesor se comunicará contigo al ${phone} a la brevedad.`,
+          leadCreated: true,
+          leadId: result.leadId,
+          message: `¡Muchas gracias, ${name.trim()}! Hemos registrado tu solicitud en el CRM de ${org.name}. Un asesor comercial se comunicará contigo al ${phone} o ${email} para coordinar la atención y agendar visitas.`,
         });
+      } catch (leadError: any) {
+        console.error('[AssistantRoute] Error persisting public lead:', leadError);
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'No fue posible registrar tu solicitud automáticamente en este momento.',
+            message: `No fue posible registrar la solicitud en el sistema. Puedes comunicarte directamente con nuestro asesor comercial vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
+            fallbackContact: FALLBACK_CONTACT,
+          },
+          { status: 500 }
+        );
       }
-
-      const createdLead = await UnifiedDataService.createLead({
-        organizationId: targetOrgId,
-        name: name.trim(),
-        phone: phone.trim(),
-        email: email.trim(),
-        operationType: criteria?.operation || 'compra',
-        propertyType: criteria?.propertyType || 'apartamento',
-        municipality: criteria?.municipality || org.city || 'Medellín',
-        zone: criteria?.zone || 'El Poblado',
-        budget: criteria?.maxBudget || 800000000,
-        interestedPropertyIds: propertyIds || [],
-        notes: `Captado por ${org.aiAssistantName} (${org.name}). Requerimiento: ${notes || 'Consulta de propiedades'}. Criterios: ${JSON.stringify(criteria || {})}`,
-        status: 'nuevo',
-        priority: 'alto',
-        source: 'asistente_ia',
-        consentHabeasData: true,
-      });
-
-      return NextResponse.json({
-        success: true,
-        leadCreated: true,
-        leadId: createdLead.id,
-        message: `¡Muchas gracias, ${name.trim()}! Hemos registrado tu solicitud en el CRM de ${org.name}. Un asesor comercial se comunicará contigo al ${phone} o ${email} para coordinar la atención y agendar visitas.`,
-      });
     }
 
     // 3. Conversational State & Context Management
