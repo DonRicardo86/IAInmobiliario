@@ -1,11 +1,16 @@
 -- ==============================================================================
 -- PROCEDIMIENTO DE CAPTACIÓN PÚBLICA SEGURA DE PROSPECTOS (LEADS)
--- IA Inmobiliaria - Módulo de Captación Pública de SofIA y Formularios Web
+-- IA Inmobiliaria - Módulo de Captación de Servidor con Privilegios Mínimos
 -- ==============================================================================
 -- Propósito:
--- Permite que visitantes no autenticados (rol 'anon') registren prospectos
--- con validación estricta de organización, Habeas Data y sanitización de campos,
--- sin otorgar permisos directos de INSERT o SELECT sobre la tabla public.leads.
+-- Permite que el backend autorizado (usando SUPABASE_SERVICE_ROLE_KEY) registre
+-- prospectos de forma atómica y validada tras haber superado las verificaciones
+-- del servidor (Habeas Data, rate limiting, validación de contacto y resolución de organización).
+--
+-- REGLA DE SEGURIDAD ESTRICTA:
+-- Este procedimiento NO es invocable directamente por visitantes anónimos ('anon')
+-- ni usuarios ordinarios ('authenticated') a través de PostgREST.
+-- Su ejecución está restringida EXCLUSIVAMENTE al rol 'service_role' del servidor.
 -- ==============================================================================
 
 CREATE OR REPLACE FUNCTION public.capture_public_lead(
@@ -33,6 +38,9 @@ DECLARE
     v_email VARCHAR;
     v_existing_lead_id UUID;
     v_new_lead_id UUID;
+    v_prop_ref TEXT;
+    v_prop_found BOOLEAN;
+    v_verified_prop_ids TEXT[] := '{}';
 BEGIN
     -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
     IF p_consent_habeas_data IS NOT TRUE THEN
@@ -50,7 +58,7 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 3. Validar existencia de la organización receptora en public.organizations
+    -- 3. Validar existencia y vigencia de la organización receptora en public.organizations
     SELECT id, name INTO v_org_id, v_org_name
     FROM public.organizations
     WHERE id = p_organization_id;
@@ -60,7 +68,25 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 4. Detección de duplicados para la misma organización (por correo o teléfono)
+    -- 4. Validar inmuebles de interés y verificar que pertenezcan a la organización receptora
+    IF p_interested_property_ids IS NOT NULL AND array_length(p_interested_property_ids, 1) > 0 THEN
+        FOREACH v_prop_ref IN ARRAY p_interested_property_ids
+        LOOP
+            IF TRIM(v_prop_ref) <> '' THEN
+                SELECT EXISTS(
+                    SELECT 1 FROM public.properties
+                    WHERE organization_id = p_organization_id
+                      AND (code = TRIM(v_prop_ref) OR id::TEXT = TRIM(v_prop_ref))
+                ) INTO v_prop_found;
+
+                IF v_prop_found THEN
+                    v_verified_prop_ids := array_append(v_verified_prop_ids, TRIM(v_prop_ref));
+                END IF;
+            END IF;
+        END LOOP;
+    END IF;
+
+    -- 5. Detección de duplicados para la misma organización (por correo o teléfono)
     SELECT id INTO v_existing_lead_id
     FROM public.leads
     WHERE organization_id = p_organization_id
@@ -73,8 +99,8 @@ BEGIN
         INSERT INTO public.lead_activities (lead_id, description, type, author)
         VALUES (
             v_existing_lead_id,
-            'Nueva solicitud registrada desde ' || COALESCE(p_source, 'asistente_ia') || '. Inmuebles: ' || 
-            CASE WHEN array_length(p_interested_property_ids, 1) > 0 THEN array_to_string(p_interested_property_ids, ', ') ELSE 'Búsqueda general' END || 
+            'Nueva solicitud registrada desde ' || COALESCE(p_source, 'asistente_ia') || '. Inmuebles verificados: ' || 
+            CASE WHEN array_length(v_verified_prop_ids, 1) > 0 THEN array_to_string(v_verified_prop_ids, ', ') ELSE 'Búsqueda general' END || 
             '. Notas: ' || COALESCE(p_notes, 'Consulta web recurrente'),
             'contact_attempt',
             'Asistente SofIA'
@@ -89,7 +115,7 @@ BEGIN
         );
     END IF;
 
-    -- 5. Inserción protegida de nuevo prospecto (campos administrativos asignados estrictamente por el servidor)
+    -- 6. Inserción protegida de nuevo prospecto (campos administrativos fijados estrictamente por el servidor)
     INSERT INTO public.leads (
         organization_id,
         name,
@@ -121,7 +147,7 @@ BEGIN
         COALESCE(p_budget, 0),
         'COP',
         ARRAY[]::TEXT[],
-        COALESCE(p_interested_property_ids, ARRAY[]::TEXT[]),
+        v_verified_prop_ids,
         COALESCE(p_notes, ''),
         'nuevo',
         'alto',
@@ -131,7 +157,7 @@ BEGIN
     )
     RETURNING id INTO v_new_lead_id;
 
-    -- 6. Registrar actividad inicial
+    -- 7. Registrar actividad inicial atómica
     INSERT INTO public.lead_activities (lead_id, description, type, author)
     VALUES (
         v_new_lead_id,
@@ -151,8 +177,12 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- ==============================================================================
--- GESTIÓN DE PRIVILEGIOS DE EJECUCIÓN (Principio de mínimo privilegio)
+-- GESTIÓN ESTRICTA DE PRIVILEGIOS (Acceso exclusivo de backend service_role)
 -- ==============================================================================
+-- 1. Revocar completamente cualquier permiso a PUBLIC, anon y authenticated
 REVOKE ALL ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM authenticated;
 
-GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO anon, authenticated, service_role;
+-- 2. Conceder EXECUTE EXCLUSIVAMENTE a service_role (backend autenticado del servidor)
+GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;

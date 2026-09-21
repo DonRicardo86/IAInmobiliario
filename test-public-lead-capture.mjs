@@ -120,9 +120,41 @@ async function runTests() {
   assert(foundLead?.priority === 'alto', 'La prioridad asignada es "alto"');
   assert(foundLead?.consentHabeasData === true, 'Se conserva la evidencia de autorización Habeas Data');
 
+  // 7. COMPORTAMIENTO ESTRICTO EN PRODUCCIÓN SIN FALLBACK A MEMORIA
+  console.log('\n🛡️ 7. SEGURIDAD EN PRODUCCIÓN: SIN SIMULACIONES NI FALSOS POSITIVOS');
+  const originalEnv = process.env.NODE_ENV;
+  const originalTestMode = process.env.TEST_MODE;
+  const originalDemoMode = process.env.DEMO_MODE;
+  
+  process.env.NODE_ENV = 'production';
+  delete process.env.TEST_MODE;
+  delete process.env.DEMO_MODE;
+
+  let productionRejectedWithoutKey = false;
+  try {
+    // Intentar captar prospecto en modo producción sin cliente administrativo
+    await UnifiedDataService.createPublicLead({
+      organizationId: targetOrgId,
+      name: 'Test Producción',
+      phone: '+57 300 111 2222',
+      email: 'test.prod@inmobiliaria.co',
+      consentHabeasData: true,
+    });
+  } catch (err) {
+    productionRejectedWithoutKey = true;
+  }
+
+  // Restaurar entorno de pruebas
+  process.env.NODE_ENV = originalEnv;
+  if (originalTestMode) process.env.TEST_MODE = originalTestMode;
+  if (originalDemoMode) process.env.DEMO_MODE = originalDemoMode;
+
+  assert(productionRejectedWithoutKey, 'En producción, se rechaza la operación si no existe persistencia real configurada (sin falsos positivos)');
+
   console.log('\n================================================================');
   console.log(`   RESULTADO DE PRUEBAS: ${passedTests}/${totalTests} APROBADAS (${Math.round((passedTests / totalTests) * 100)}%)`);
   console.log('================================================================\n');
 }
 
 runTests().catch(console.error);
+

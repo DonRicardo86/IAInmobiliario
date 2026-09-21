@@ -594,7 +594,6 @@ export class UnifiedDataService {
   ): Promise<{ success: boolean; leadId?: string; isDuplicate?: boolean; message: string }> {
     const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
     const adminSupabase = getSupabaseAdminClient();
-    const anonSupabase = getSupabaseAnonClient();
 
     // 1. Validaciones obligatorias de servidor
     if (!leadData.name?.trim() || !leadData.phone?.trim() || !leadData.email?.trim()) {
@@ -608,10 +607,41 @@ export class UnifiedDataService {
     const cleanPhone = leadData.phone.trim();
     const cleanName = leadData.name.trim();
 
-    // Prioridad 1: Si SUPABASE_SERVICE_ROLE_KEY está configurada en Vercel, usar cliente administrativo del servidor
+    // 2. Ejecución exclusiva de servidor con clave administrativa (SUPABASE_SERVICE_ROLE_KEY)
     if (adminSupabase) {
       try {
-        // Detección de duplicados en la misma organización
+        // Intento A: Invocar el procedimiento atómico capture_public_lead con privilegios service_role
+        const { data: rpcData, error: rpcError } = await adminSupabase.rpc('capture_public_lead', {
+          p_organization_id: leadData.organizationId,
+          p_name: cleanName,
+          p_phone: cleanPhone,
+          p_email: cleanEmail,
+          p_operation_type: leadData.operationType || 'compra',
+          p_property_type: leadData.propertyType || 'apartamento',
+          p_municipality: leadData.municipality || 'Medellín',
+          p_zone: leadData.zone || 'El Poblado',
+          p_budget: Number(leadData.budget) || 0,
+          p_interested_property_ids: leadData.interestedPropertyIds || [],
+          p_notes: leadData.notes || '',
+          p_consent_habeas_data: true,
+          p_source: leadData.source || 'asistente_ia',
+          p_client_ip: clientIp,
+        });
+
+        if (!rpcError && rpcData && typeof rpcData === 'object') {
+          return {
+            success: rpcData.success ?? true,
+            leadId: rpcData.lead_id,
+            isDuplicate: rpcData.is_duplicate,
+            message: rpcData.message || 'Prospecto registrado exitosamente en Supabase.',
+          };
+        }
+
+        if (rpcError) {
+          console.warn('[SupabaseAdapter] RPC capture_public_lead not available or errored, attempting direct admin insert:', rpcError.message);
+        }
+
+        // Intento B: Inserción directa mediante cliente service_role con validación de duplicados
         const { data: existingLead } = await adminSupabase
           .from('leads')
           .select('id')
@@ -658,22 +688,20 @@ export class UnifiedDataService {
           consentHabeasData: true,
         });
 
-        const { data, error } = await adminSupabase
+        const { data: insertedLead, error: insertError } = await adminSupabase
           .from('leads')
           .insert(payload)
           .select('id')
           .single();
 
-        if (error) {
-          console.error('[SupabaseAdapter] Admin lead insertion error:', error);
-          if (isProduction) {
-            throw new Error(`Error en base de datos al registrar prospecto: ${error.message}`);
-          }
+        if (insertError) {
+          console.error('[SupabaseAdapter] Admin lead insertion error:', insertError);
+          throw new Error(`Error en PostgreSQL al registrar prospecto: ${insertError.message}`);
         }
 
-        if (data) {
+        if (insertedLead) {
           await adminSupabase.from('lead_activities').insert({
-            lead_id: data.id,
+            lead_id: insertedLead.id,
             description: `Prospecto captado exitosamente mediante ${leadData.source || 'asistente_ia'}. Autorización Habeas Data verificada.`,
             type: 'created',
             author: 'Sistema IA',
@@ -681,67 +709,24 @@ export class UnifiedDataService {
 
           return {
             success: true,
-            leadId: data.id,
+            leadId: insertedLead.id,
             isDuplicate: false,
             message: 'Prospecto creado exitosamente en el CRM.',
           };
         }
       } catch (err: any) {
-        console.error('[SupabaseAdapter] Exception in admin createPublicLead:', err);
-        if (isProduction && !anonSupabase) {
-          throw new Error(err.message || 'Error al persistir prospecto en Supabase.');
-        }
+        console.error('[SupabaseAdapter] Exception in createPublicLead:', err);
+        throw new Error(err.message || 'Error al persistir prospecto en Supabase.');
       }
     }
 
-    // Prioridad 2: Si no hay clave admin configurada o se utiliza el procedimiento de privilegio mínimo, invocar capture_public_lead RPC
-    if (anonSupabase) {
-      try {
-        const { data, error } = await anonSupabase.rpc('capture_public_lead', {
-          p_organization_id: leadData.organizationId,
-          p_name: cleanName,
-          p_phone: cleanPhone,
-          p_email: cleanEmail,
-          p_operation_type: leadData.operationType || 'compra',
-          p_property_type: leadData.propertyType || 'apartamento',
-          p_municipality: leadData.municipality || 'Medellín',
-          p_zone: leadData.zone || 'El Poblado',
-          p_budget: Number(leadData.budget) || 0,
-          p_interested_property_ids: leadData.interestedPropertyIds || [],
-          p_notes: leadData.notes || '',
-          p_consent_habeas_data: true,
-          p_source: leadData.source || 'asistente_ia',
-          p_client_ip: clientIp,
-        });
-
-        if (error) {
-          console.error('[SupabaseAdapter] capture_public_lead RPC error:', error);
-          if (isProduction) {
-            throw new Error(`Error al registrar prospecto en Supabase: ${error.message}`);
-          }
-        }
-
-        if (data && typeof data === 'object') {
-          return {
-            success: data.success ?? true,
-            leadId: data.lead_id,
-            isDuplicate: data.is_duplicate,
-            message: data.message || 'Prospecto registrado exitosamente en Supabase.',
-          };
-        }
-      } catch (err: any) {
-        console.error('[SupabaseAdapter] Exception calling capture_public_lead RPC:', err);
-        if (isProduction) {
-          throw new Error(err.message || 'Error en el procedimiento de captación pública de Supabase.');
-        }
-      }
-    }
-
-    // Prioridad 3: Modo local / Demostración en memoria
+    // 3. Control de producción estricto: Si no hay clave admin en producción, RECHAZAR sin fallback a memoria
     if (isProduction) {
-      throw new Error('No se pudo establecer conexión segura con Supabase para registrar el prospecto.');
+      console.error('[SupabaseAdapter] ERROR CRÍTICO: SUPABASE_SERVICE_ROLE_KEY no está configurada en producción.');
+      throw new Error('Error de configuración del servidor: Se requiere SUPABASE_SERVICE_ROLE_KEY para registrar prospectos en Supabase.');
     }
 
+    // 4. Modo desarrollo local / demostración en memoria explícita (NO PRODUCCIÓN)
     const existingMemoryLead = await ServerStore.findDuplicateLead(cleanEmail, cleanPhone, leadData.organizationId);
     if (existingMemoryLead) {
       await ServerStore.addLeadActivity(
