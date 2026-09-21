@@ -47,11 +47,31 @@ export const COMMERCIAL_ORGANIZATION: Organization = {
   updatedAt: '2026-09-21T00:00:00Z',
 };
 
-export const DEFAULT_ORGANIZATION = DEMO_ORGANIZATION;
+export const PILOT_ORGANIZATION: Organization = {
+  id: 'inmo-piloto-default',
+  name: 'Inmobiliaria Piloto',
+  slug: 'inmo-piloto',
+  nit: '901.987.654-3',
+  phone: '+57 304 360 5155',
+  email: 'contacto@inmobiliariapiloto.com',
+  city: 'Medellín',
+  address: 'Medellín, Antioquia, Colombia',
+  currency: 'COP',
+  aiAssistantName: 'SofIA Inmobiliaria',
+  aiAssistantWelcomeMessage: '¡Hola! Soy SofIA, tu asesora inmobiliaria virtual de Inmobiliaria Piloto en Medellín y el Área Metropolitana. 👋\n\n¿Estás buscando comprar o arrendar una propiedad? Cuéntame qué tipo de inmueble buscas, la zona de tu preferencia y tu presupuesto aproximado.',
+  createdAt: '2026-09-01T00:00:00Z',
+  updatedAt: '2026-09-21T00:00:00Z',
+};
+
+export const DEFAULT_ORGANIZATION = PILOT_ORGANIZATION;
 
 export const KNOWN_ORGANIZATIONS: Record<string, Organization> = {
+  [PILOT_ORGANIZATION.id]: PILOT_ORGANIZATION,
+  [PILOT_ORGANIZATION.slug]: PILOT_ORGANIZATION,
   [DEMO_ORGANIZATION.id]: DEMO_ORGANIZATION,
+  [DEMO_ORGANIZATION.slug]: DEMO_ORGANIZATION,
   [COMMERCIAL_ORGANIZATION.id]: COMMERCIAL_ORGANIZATION,
+  [COMMERCIAL_ORGANIZATION.slug]: COMMERCIAL_ORGANIZATION,
 };
 
 export function getOrganizationById(id?: string): Organization {
@@ -61,4 +81,9 @@ export function getOrganizationById(id?: string): Organization {
     id,
     name: `Inmobiliaria ${id.slice(-6)}`,
   };
+}
+
+export function getOrganizationBySlug(slug?: string): Organization {
+  if (!slug) return DEFAULT_ORGANIZATION;
+  return KNOWN_ORGANIZATIONS[slug] || getOrganizationById(slug);
 }

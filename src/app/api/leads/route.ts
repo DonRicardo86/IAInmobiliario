@@ -102,8 +102,12 @@ export async function POST(req: NextRequest) {
     let targetOrgId = DEFAULT_ORGANIZATION.id;
     if (authSession) {
       targetOrgId = authSession.organizationId;
-    } else if (body.organizationId && KNOWN_ORGANIZATIONS[body.organizationId]) {
-      targetOrgId = body.organizationId;
+    } else {
+      const orgParam = body.orgSlug || body.organizationId || DEFAULT_ORGANIZATION.slug;
+      const org = await UnifiedDataService.getPublicOrganizationBySlugOrId(orgParam);
+      if (org) {
+        targetOrgId = org.id;
+      }
     }
 
     // Check duplicate

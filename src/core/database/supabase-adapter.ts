@@ -1,7 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Property, PropertyFilters, PropertyPublicView, CreatePropertyInput } from '../types/property';
 import { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
-import { Organization, DEFAULT_ORGANIZATION } from '../types/organization';
+import { Organization, DEFAULT_ORGANIZATION, KNOWN_ORGANIZATIONS } from '../types/organization';
 import { ServerStore } from './server-store';
 
 let supabaseAnonClient: SupabaseClient | null = null;
@@ -142,11 +142,56 @@ export class UnifiedDataService {
     return ServerStore.getProperties(filters, organizationId);
   }
 
+  // ORGANIZATIONS
+  static async getPublicOrganizationBySlugOrId(identifier?: string): Promise<Organization | null> {
+    const targetSlugOrId = identifier || DEFAULT_ORGANIZATION.slug;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetSlugOrId);
+    const supabase = getSupabaseClient();
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
+    if (supabase) {
+      try {
+        let query = supabase.from('public_organizations').select('*');
+        if (isUuid) {
+          query = query.or(`id.eq.${targetSlugOrId},slug.eq.${targetSlugOrId}`);
+        } else {
+          query = query.eq('slug', targetSlugOrId);
+        }
+
+        const { data, error } = await query.maybeSingle();
+        if (!error && data) {
+          return this.mapSupabasePublicOrgToDomain(data);
+        }
+        if (error) {
+          console.error('[SupabaseAdapter] Query public_organizations error:', error);
+          if (isProduction) {
+            throw new Error(`Error al consultar organización en Supabase: ${error.message}`);
+          }
+        }
+      } catch (err) {
+        if (isProduction) throw err;
+        console.error('[SupabaseAdapter] Fallback to known organizations error', err);
+      }
+    }
+
+    if (KNOWN_ORGANIZATIONS[targetSlugOrId]) {
+      return KNOWN_ORGANIZATIONS[targetSlugOrId];
+    }
+
+    if (isProduction) {
+      return null;
+    }
+
+    return DEFAULT_ORGANIZATION;
+  }
+
   static async getPublicProperties(
     filters?: Partial<PropertyFilters>,
     organizationId: string = DEFAULT_ORGANIZATION.id
   ): Promise<PropertyPublicView[]> {
     const supabase = getSupabaseClient();
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
       try {
         let query = supabase
@@ -160,15 +205,34 @@ export class UnifiedDataService {
         if (filters?.type && filters.type !== 'todos') {
           query = query.eq('type', filters.type);
         }
+        if (filters?.municipality && filters.municipality !== 'todos') {
+          query = query.ilike('municipality', `%${filters.municipality}%`);
+        }
+        if (filters?.zone && filters.zone !== 'todas') {
+          query = query.ilike('zone', `%${filters.zone}%`);
+        }
+        if (filters?.search) {
+          query = query.or(`title.ilike.%${filters.search}%,description.ilike.%${filters.search}%,code.ilike.%${filters.search}%,zone.ilike.%${filters.search}%,municipality.ilike.%${filters.search}%`);
+        }
 
         const { data, error } = await query;
         if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabasePublicPropertyToDomain);
         }
-        if (error) throw error;
+        if (error) {
+          console.error('[SupabaseAdapter] Public properties query error:', error);
+          if (isProduction) {
+            throw new Error(`Error al consultar catálogo público en Supabase: ${error.message}`);
+          }
+        }
       } catch (err) {
+        if (isProduction) throw err;
         console.error('[SupabaseAdapter] Fallback to ServerStore on public properties error', err);
       }
+    }
+
+    if (isProduction) {
+      return [];
     }
 
     return ServerStore.getPublicProperties(filters, organizationId);
@@ -176,50 +240,95 @@ export class UnifiedDataService {
 
   static async matchPropertiesForAssistant(
     criteria: {
+      searchQuery?: string;
+      code?: string;
       operation?: 'compra' | 'arriendo';
       propertyType?: string;
       municipality?: string;
       zone?: string;
       maxBudget?: number;
       minBedrooms?: number;
+      minBathrooms?: number;
       requiredFeatures?: string[];
     },
     organizationId: string = DEFAULT_ORGANIZATION.id
   ): Promise<PropertyPublicView[]> {
     const catalog = await this.getPublicProperties({}, organizationId);
+    if (!catalog || catalog.length === 0) {
+      return [];
+    }
 
     return catalog.filter((p) => {
+      // 1. Direct code search (e.g. INM-585, 585)
+      if (criteria.code) {
+        const cleanReq = criteria.code.toUpperCase().replace(/\s+/g, '');
+        const cleanProp = p.code.toUpperCase().replace(/\s+/g, '');
+        if (cleanProp.includes(cleanReq) || cleanReq.includes(cleanProp)) {
+          return true;
+        }
+      }
+
+      // 2. Query search string matching title, code or description
+      if (criteria.searchQuery) {
+        const qLower = criteria.searchQuery.toLowerCase();
+        if (
+          p.code.toLowerCase().includes(qLower) ||
+          p.title.toLowerCase().includes(qLower) ||
+          p.zone.toLowerCase().includes(qLower) ||
+          p.municipality.toLowerCase().includes(qLower)
+        ) {
+          return true;
+        }
+      }
+
+      // 3. Operation match
       if (criteria.operation && p.operation !== criteria.operation) return false;
 
+      // 4. Property type match
       if (criteria.propertyType && criteria.propertyType !== 'todos') {
-        if (!p.type.toLowerCase().includes(criteria.propertyType.toLowerCase()) &&
-            !criteria.propertyType.toLowerCase().includes(p.type.toLowerCase())) {
+        const propType = p.type.toLowerCase();
+        const reqType = criteria.propertyType.toLowerCase();
+        if (!propType.includes(reqType) && !reqType.includes(propType)) {
           return false;
         }
       }
 
+      // 5. Municipality & Zone match
       if (criteria.municipality && criteria.municipality.trim() !== '') {
-        const munMatch = p.municipality.toLowerCase().includes(criteria.municipality.toLowerCase());
-        const zoneMatch = p.zone.toLowerCase().includes(criteria.municipality.toLowerCase());
-        if (!munMatch && !zoneMatch) return false;
+        const reqMun = criteria.municipality.toLowerCase();
+        const munMatch = p.municipality.toLowerCase().includes(reqMun) || reqMun.includes(p.municipality.toLowerCase());
+        const zoneMatch = p.zone.toLowerCase().includes(reqMun) || reqMun.includes(p.zone.toLowerCase());
+        const titleMatch = p.title.toLowerCase().includes(reqMun);
+        if (!munMatch && !zoneMatch && !titleMatch) return false;
       }
 
       if (criteria.zone && criteria.zone.trim() !== '') {
-        const zoneMatch = p.zone.toLowerCase().includes(criteria.zone.toLowerCase());
+        const reqZone = criteria.zone.toLowerCase();
+        const zoneMatch = p.zone.toLowerCase().includes(reqZone) ||
+                          reqZone.includes(p.zone.toLowerCase()) ||
+                          p.title.toLowerCase().includes(reqZone) ||
+                          (p.description && p.description.toLowerCase().includes(reqZone));
         if (!zoneMatch) return false;
       }
 
+      // 6. Budget match with 15% tolerance
       if (criteria.maxBudget && criteria.maxBudget > 0) {
         const budgetLimit = criteria.maxBudget * 1.15;
         if (p.priceCOP > budgetLimit) return false;
       }
 
+      // 7. Bedrooms match
       if (criteria.minBedrooms && criteria.minBedrooms > 0) {
         if (p.bedrooms < criteria.minBedrooms) return false;
       }
 
+      // 8. Bathrooms match
+      if (criteria.minBathrooms && criteria.minBathrooms > 0) {
+        if (p.bathrooms < criteria.minBathrooms) return false;
+      }
+
       return true;
-    }).slice(0, 3);
+    }).slice(0, 5);
   }
 
   static async getPropertyById(id: string, authToken?: string): Promise<Property | null> {
@@ -812,5 +921,22 @@ export class UnifiedDataService {
     if (l.assignedAgent) res.assigned_agent = l.assignedAgent;
     if (l.consentHabeasData !== undefined) res.consent_habeas_data = l.consentHabeasData;
     return res;
+  }
+
+  private static mapSupabasePublicOrgToDomain(row: any): Organization {
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      phone: row.phone || '+57 304 360 5155',
+      email: row.email || 'contacto@inmobiliaria.com',
+      city: row.city || 'Medellín',
+      logoUrl: row.logo_url || undefined,
+      currency: row.currency || 'COP',
+      aiAssistantName: row.ai_assistant_name || 'SofIA Inmobiliaria',
+      aiAssistantWelcomeMessage: row.ai_assistant_welcome_message || `¡Hola! Soy SofIA, tu asesora inmobiliaria virtual de ${row.name}. 👋\n\n¿Estás buscando comprar o arrendar una propiedad? Cuéntame qué tipo de inmueble buscas, la zona de tu preferencia y tu presupuesto aproximado.`,
+      createdAt: row.created_at || new Date().toISOString(),
+      updatedAt: row.updated_at || new Date().toISOString(),
+    };
   }
 }

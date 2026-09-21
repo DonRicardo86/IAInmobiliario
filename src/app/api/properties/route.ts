@@ -36,11 +36,20 @@ export async function GET(req: NextRequest) {
 
     // Public catalog view: only non-sensitive fields from public_properties
     if (view === 'public') {
-      const publicProperties = await UnifiedDataService.getPublicProperties(filters, targetOrgId);
+      const orgParam = searchParams.get('organizationId') || searchParams.get('org') || searchParams.get('slug') || DEFAULT_ORGANIZATION.slug;
+      const org = await UnifiedDataService.getPublicOrganizationBySlugOrId(orgParam);
+      const orgId = org?.id || targetOrgId;
+
+      const publicProperties = await UnifiedDataService.getPublicProperties(filters, orgId);
       return NextResponse.json({
         success: true,
         properties: publicProperties,
-        organizationId: targetOrgId || DEFAULT_ORGANIZATION.id,
+        organization: org ? {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          city: org.city,
+        } : null,
       });
     }
 

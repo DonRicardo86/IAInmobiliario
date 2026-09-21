@@ -1,8 +1,10 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, Suspense, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { PropertyPublicView } from '@/core/types/property';
+import { Organization, PILOT_ORGANIZATION } from '@/core/types/organization';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useToast } from '@/components/ui/Toast';
@@ -33,21 +35,17 @@ interface ChatMessage {
   timestamp: string;
 }
 
-export default function AsistenteIAPage() {
+function AsistenteIAContent() {
   const { showToast } = useToast();
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome-1',
-      sender: 'bot',
-      text: '¡Hola! Soy SofIA, tu asesora inmobiliaria virtual de Inmobiliaria Premier en Colombia. 👋\n\n¿Estás buscando comprar o arrendar una propiedad? Cuéntame qué tipo de inmueble buscas, la zona de tu preferencia y tu presupuesto aproximado.',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    },
-  ]);
+  const searchParams = useSearchParams();
+  const orgSlug = searchParams.get('org') || 'inmo-piloto';
 
+  const [org, setOrg] = useState<Organization>(PILOT_ORGANIZATION);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentCriteria, setCurrentCriteria] = useState<any>({});
-  const [modeNotice, setModeNotice] = useState<string>('Modo Asistente por Reglas / Demostración');
+  const [modeNotice, setModeNotice] = useState<string>('Conectado al Inventario Real');
 
   // Lead Intake Form State
   const [showLeadForm, setShowLeadForm] = useState(false);
@@ -63,6 +61,41 @@ export default function AsistenteIAPage() {
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
+
+  // Load organization details from backend
+  useEffect(() => {
+    async function loadOrg() {
+      try {
+        const res = await fetch(`/api/organizations?slug=${encodeURIComponent(orgSlug)}`);
+        const data = await res.json();
+        if (data.success && data.organization) {
+          setOrg(data.organization);
+          setMessages([
+            {
+              id: 'welcome-1',
+              sender: 'bot',
+              text: data.organization.aiAssistantWelcomeMessage || `¡Hola! Soy SofIA, tu asesora inmobiliaria virtual de ${data.organization.name} en ${data.organization.city || 'Medellín'}. 👋\n\n¿Estás buscando comprar o arrendar una propiedad? Cuéntame qué tipo de inmueble buscas, la zona de tu preferencia y tu presupuesto aproximado.`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+          setModeNotice(`Asistente Oficial • ${data.organization.name}`);
+        } else {
+          // Fallback to pilot organization
+          setMessages([
+            {
+              id: 'welcome-1',
+              sender: 'bot',
+              text: PILOT_ORGANIZATION.aiAssistantWelcomeMessage,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+        }
+      } catch (err) {
+        console.error('Error fetching org for assistant:', err);
+      }
+    }
+    loadOrg();
+  }, [orgSlug]);
 
   useEffect(() => {
     scrollToBottom();
@@ -95,6 +128,7 @@ export default function AsistenteIAPage() {
         body: JSON.stringify({
           messages: history,
           userContext: currentCriteria,
+          orgSlug: orgSlug,
         }),
       });
 
@@ -113,11 +147,11 @@ export default function AsistenteIAPage() {
         };
         setMessages((prev) => [...prev, botMsg]);
       } else {
-        showToast('Error en la comunicación con el asistente', 'error');
+        showToast(data.error || 'Error en la comunicación con el asistente', 'error');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      showToast('Error de conexión', 'error');
+      showToast('Error de conexión con el servidor', 'error');
     } finally {
       setLoading(false);
     }
@@ -140,13 +174,14 @@ export default function AsistenteIAPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          orgSlug: orgSlug,
           leadCapture: {
             name: leadName.trim(),
             phone: leadPhone.trim(),
             email: leadEmail.trim(),
             criteria: currentCriteria,
             consentHabeasData: true,
-            notes: `Captura desde Asistente SofIA. Criterios: ${JSON.stringify(currentCriteria)}`,
+            notes: `Captura desde Asistente SofIA (${org?.name || 'Inmobiliaria'}). Criterios: ${JSON.stringify(currentCriteria)}`,
           },
         }),
       });
@@ -155,7 +190,7 @@ export default function AsistenteIAPage() {
       if (data.success) {
         setLeadSuccess(true);
         setShowLeadForm(false);
-        showToast('¡Prospecto registrado exitosamente en el CRM!', 'success');
+        showToast('¡Solicitud registrada con éxito en el CRM!', 'success');
 
         setMessages((prev) => [
           ...prev,
@@ -169,7 +204,7 @@ export default function AsistenteIAPage() {
       } else {
         showToast(data.error || 'Error al registrar solicitud', 'error');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
       showToast('Error al enviar datos', 'error');
     } finally {
@@ -178,11 +213,11 @@ export default function AsistenteIAPage() {
   };
 
   const quickPrompts = [
-    'Busco comprar apartamento en El Poblado con balcón',
-    'Arriendo de apartaestudio amoblado en Laureles',
-    'Casa campestre en Envigado con jardín',
-    'Penthouse de lujo en Rosales / Chapinero',
-    'Oficina corporativa en arriendo en Medellín',
+    'Consultar inmueble INM-585',
+    'Busco apartamento en compra en Medellín',
+    'Arriendo en El Poblado con 2 alcobas',
+    'Casa campestre en Envigado',
+    'Oficina corporativa en arriendo',
   ];
 
   return (
@@ -200,7 +235,7 @@ export default function AsistenteIAPage() {
         }}
       >
         <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', textDecoration: 'none' }}>
+          <Link href={`/propiedades?org=${encodeURIComponent(orgSlug)}`} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', textDecoration: 'none' }}>
             <div
               style={{
                 width: '36px',
@@ -217,15 +252,18 @@ export default function AsistenteIAPage() {
             </div>
             <div>
               <span style={{ fontWeight: 800, fontSize: '1.05rem', color: '#fff', display: 'block' }}>
-                SofIA • Asesora Inmobiliaria Virtual
+                SofIA • {org?.name || 'Inmobiliaria Piloto'}
               </span>
               <span style={{ fontSize: '0.72rem', color: 'var(--accent-emerald)' }}>● Conectada al inventario en tiempo real</span>
             </div>
           </Link>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            <Link href="/propiedades" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textDecoration: 'none', fontWeight: 500 }}>
-              Ver Catálogo
+            <Link
+              href={`/propiedades?org=${encodeURIComponent(orgSlug)}`}
+              style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textDecoration: 'none', fontWeight: 500 }}
+            >
+              Ver Catálogo ({org?.name || 'Piloto'})
             </Link>
             <Button
               variant="primary"
@@ -255,7 +293,7 @@ export default function AsistenteIAPage() {
       >
         <Info size={14} color="var(--primary-light)" />
         <span>
-          <strong>{modeNotice}</strong> — Consultando inventario real de propiedades verificado.
+          <strong>{modeNotice}</strong> — Consultando inventario verificado en Supabase PostgreSQL.
         </span>
       </div>
 
@@ -345,8 +383,8 @@ export default function AsistenteIAPage() {
                               // eslint-disable-next-line @next/next/no-img-element
                               <img src={p.images[0]} alt={p.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                             ) : (
-                              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0f172a' }}>
-                                Sin foto
+                              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0f172a', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                                Ficha Oficial
                               </div>
                             )}
                             <span
@@ -369,7 +407,7 @@ export default function AsistenteIAPage() {
 
                           <div style={{ padding: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.35rem', flex: 1 }}>
                             <span style={{ fontSize: '0.72rem', color: 'var(--secondary)', fontWeight: 600 }}>
-                              {p.code} • {p.municipality}
+                              {p.code} • {p.municipality} ({p.zone})
                             </span>
                             <strong style={{ fontSize: '0.85rem', color: '#fff', lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                               {p.title}
@@ -378,7 +416,7 @@ export default function AsistenteIAPage() {
                               {formattedPrice}
                             </span>
                             <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                              {p.areaM2} m² • {p.bedrooms} alcobas
+                              {p.areaM2} m² • {p.bedrooms} alcobas • {p.bathrooms} baños
                             </span>
 
                             <Link
@@ -451,7 +489,7 @@ export default function AsistenteIAPage() {
               }}
             >
               <span style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--secondary)', animation: 'pulseGlow 1s infinite' }} />
-              <span>SofIA está consultando el inventario...</span>
+              <span>SofIA está consultando el catálogo en tiempo real...</span>
             </div>
           </div>
         )}
@@ -506,7 +544,7 @@ export default function AsistenteIAPage() {
           >
             <input
               type="text"
-              placeholder="Escribe tu mensaje a SofIA (ej. 'Busco apartamento en compra en Poblado con presupuesto 900 millones')..."
+              placeholder={`Escribe tu mensaje a SofIA (ej. 'Busco apartamento en compra en Medellín o código INM-585')...`}
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
               disabled={loading}
@@ -574,7 +612,7 @@ export default function AsistenteIAPage() {
             </div>
 
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', lineHeight: 1.5 }}>
-              Deja tus datos de contacto para que un asesor inmobiliario especializado te contacte y te ayude a coordinar visitas.
+              Deja tus datos de contacto para que un asesor inmobiliario de <strong>{org?.name || 'Inmobiliaria Piloto'}</strong> te contacte directamente para coordinar visitas.
             </p>
 
             <form onSubmit={handleLeadSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -611,7 +649,7 @@ export default function AsistenteIAPage() {
                   style={{ marginTop: '0.2rem', cursor: 'pointer' }}
                 />
                 <label htmlFor="leadConsent" style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.4, cursor: 'pointer' }}>
-                  Autorizo el tratamiento de mis datos personales según la Ley 1581 de 2012 para ser contactado por Inmobiliaria Premier.
+                  Autorizo el tratamiento de mis datos personales según la Ley 1581 de 2012 (Habeas Data) para ser contactado por {org?.name || 'la inmobiliaria'}.
                 </label>
               </div>
 
@@ -628,5 +666,13 @@ export default function AsistenteIAPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function AsistenteIAPage() {
+  return (
+    <Suspense fallback={<div style={{ minHeight: '100vh', backgroundColor: 'var(--bg-main)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>Cargando Asistente Virtual SofIA...</div>}>
+      <AsistenteIAContent />
+    </Suspense>
   );
 }
