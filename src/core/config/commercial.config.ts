@@ -6,11 +6,11 @@
  */
 
 export const COMMERCIAL_CONFIG = {
-  // Número de WhatsApp oficial para ventas (formato internacional ej. 573001112233)
-  whatsappNumber: process.env.NEXT_PUBLIC_COMMERCIAL_WHATSAPP || '',
+  // Número de WhatsApp oficial para ventas (formato internacional ej. 573043605155)
+  whatsappNumber: process.env.NEXT_PUBLIC_COMMERCIAL_WHATSAPP || '573043605155',
 
   // Correo electrónico corporativo oficial para propuestas y demos
-  salesEmail: process.env.NEXT_PUBLIC_COMMERCIAL_EMAIL || 'comercial@iainmobiliaria.co',
+  salesEmail: process.env.NEXT_PUBLIC_COMMERCIAL_EMAIL || 'agenteinmobiliaria1986@gmail.com',
 
   // Nombre del equipo comercial
   salesTeamName: 'Equipo Comercial IA Inmobiliaria Colombia',

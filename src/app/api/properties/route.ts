@@ -26,9 +26,11 @@ export async function GET(req: NextRequest) {
       maxPrice,
     };
 
+    const targetOrgId = searchParams.get('organizationId') || undefined;
+
     if (view === 'public') {
-      const publicProperties = await UnifiedDataService.getPublicProperties(filters);
-      return NextResponse.json({ success: true, properties: publicProperties });
+      const publicProperties = await UnifiedDataService.getPublicProperties(filters, targetOrgId);
+      return NextResponse.json({ success: true, properties: publicProperties, organizationId: targetOrgId || 'org_inmo_premier_001' });
     }
 
     // Admin view: Check if authenticated or in public demo tour

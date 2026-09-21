@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
+import { DEFAULT_ORGANIZATION, getOrganizationById } from '@/core/types/organization';
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -9,35 +10,57 @@ interface ChatMessage {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { messages, userContext, leadCapture } = body;
+    const { messages, userContext, leadCapture, organizationId } = body;
+    const targetOrgId = organizationId || DEFAULT_ORGANIZATION.id;
+    const org = getOrganizationById(targetOrgId);
 
     // 1. If this is a direct lead capture request from the assistant
     if (leadCapture) {
       const { name, phone, email, criteria, propertyIds, notes, consentHabeasData } = leadCapture;
-      if (!name || !phone || !email) {
+      if (!name?.trim() || !phone?.trim() || !email?.trim()) {
         return NextResponse.json(
-          { success: false, error: 'Faltan datos de contacto obligatorios' },
+          { success: false, error: 'Faltan datos de contacto obligatorios (nombre, teléfono y correo).' },
           { status: 400 }
         );
       }
       if (!consentHabeasData) {
         return NextResponse.json(
-          { success: false, error: 'Se requiere la autorización de tratamiento de datos personales (Habeas Data).' },
+          { success: false, error: 'Se requiere la autorización expresa de tratamiento de datos personales según la Ley 1581 de 2012 (Habeas Data).' },
           { status: 400 }
         );
       }
 
+      // Check duplicate
+      const existingLead = await UnifiedDataService.findDuplicateLead(email.trim(), phone.trim(), targetOrgId);
+      if (existingLead) {
+        await UnifiedDataService.addLeadActivity(
+          existingLead.id,
+          `Nueva interacción registrada desde el Asistente Web SofIA. Inmuebles de interés: ${(propertyIds || []).join(', ') || 'Búsqueda general'}. Notas: ${notes || 'Consulta reiterada'}`,
+          'contact_attempt',
+          org.aiAssistantName
+        );
+
+        return NextResponse.json({
+          success: true,
+          leadCreated: false,
+          leadUpdated: true,
+          leadId: existingLead.id,
+          message: `¡Hola de nuevo, ${name.trim()}! Hemos actualizado tu requerimiento existente en el sistema comercial de ${org.name}. Uno de nuestros asesores te contactará a la brevedad.`,
+        });
+      }
+
       const createdLead = await UnifiedDataService.createLead({
-        name,
-        phone,
-        email,
+        organizationId: targetOrgId,
+        name: name.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
         operationType: criteria?.operation || 'compra',
         propertyType: criteria?.propertyType || 'apartamento',
-        municipality: criteria?.municipality || 'Medellín',
+        municipality: criteria?.municipality || org.city || 'Medellín',
         zone: criteria?.zone || 'El Poblado',
         budget: criteria?.maxBudget || 800000000,
         interestedPropertyIds: propertyIds || [],
-        notes: `Captado por Asistente Web IA. Requerimiento: ${notes || 'Consulta de propiedades'}. Criterios: ${JSON.stringify(criteria || {})}`,
+        notes: `Captado por ${org.aiAssistantName}. Requerimiento: ${notes || 'Consulta de propiedades'}. Criterios: ${JSON.stringify(criteria || {})}`,
         status: 'nuevo',
         priority: 'alto',
         source: 'asistente_ia',
@@ -48,7 +71,7 @@ export async function POST(req: NextRequest) {
         success: true,
         leadCreated: true,
         leadId: createdLead.id,
-        message: `¡Muchas gracias, ${name}! Hemos registrado tu requerimiento en nuestro CRM comercial. Un asesor experto de Inmobiliaria Premier se comunicará contigo al ${phone} o ${email} para coordinar visitas a los inmuebles seleccionados.`,
+        message: `¡Muchas gracias, ${name.trim()}! Hemos registrado tu solicitud en el CRM de ${org.name}. Un asesor comercial se comunicará contigo al ${phone} o ${email} para coordinar visitas a los inmuebles de tu interés.`,
       });
     }
 
@@ -151,19 +174,19 @@ export async function POST(req: NextRequest) {
 
     if (apiKey && apiKey.startsWith('sk-')) {
       try {
-        const matches = await UnifiedDataService.matchPropertiesForAssistant(parsedCriteria);
+        const matches = await UnifiedDataService.matchPropertiesForAssistant(parsedCriteria, targetOrgId);
 
-        const systemPrompt = `Eres SofIA, la asesora virtual inmobiliaria de Inmobiliaria Premier en Colombia.
+        const systemPrompt = `Eres ${org.aiAssistantName}, la asesora virtual inmobiliaria de ${org.name} en Colombia.
 Tu objetivo es orientar cordialmente a compradores y arrendatarios, consultar el inventario real y captar sus datos para que un asesor humano agende visitas.
 
-REGLAS ESTRICTAS DE NEGOCIO:
-1. NO inventes inmuebles, precios ni disponibilidades.
-2. Estos son los inmuebles REALES disponibles en la base de datos que coinciden con la búsqueda:
+REGLAS ESTRICTAS DE NEGOCIO Y HONESTIDAD:
+1. NUNCA inventes inmuebles, códigos, precios, ubicaciones ni disponibilidades.
+2. Estos son los inmuebles REALES y CONFIRMADOS en la base de datos de ${org.name} que coinciden con la búsqueda:
 ${JSON.stringify(matches, null, 2)}
-3. Si hay propiedades coincidentes, preséntalas brevemente destacando zona, precio en COP y características.
-4. Si no hay propiedades que coincidan, dilo con amabilidad y ofrece registrar el requerimiento para que un asesor busque opciones no listadas o sobre planos.
-5. Invita al usuario a dejar su nombre, teléfono y correo para agendar una visita formal.
-6. Habla en español de Colombia, tono profesional, cálido y conciso.`;
+3. Si hay propiedades coincidentes, preséntalas con precisión indicando código, zona, precio en COP, alcobas y baños.
+4. Si no hay propiedades que coincidan (lista vacía), dilo con amabilidad e invita al usuario a dejar sus datos para que un asesor busque opciones no listadas en el catálogo público o proyectos en desarrollo.
+5. Invita cordialmente al usuario a hacer clic en "Solicitar Asesoría Humana" o proporcionar su nombre, teléfono y correo para agendar una visita formal.
+6. Comunícate en español de Colombia, con tono profesional, empático, cálido y conciso.`;
 
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -185,9 +208,11 @@ ${JSON.stringify(matches, null, 2)}
           return NextResponse.json({
             success: true,
             mode: 'openai_live',
+            aiModel: 'gpt-4o-mini',
             response: aiText,
             matchedProperties: matches,
             updatedCriteria: parsedCriteria,
+            organizationId: targetOrgId,
           });
         }
       } catch (err) {
@@ -195,8 +220,8 @@ ${JSON.stringify(matches, null, 2)}
       }
     }
 
-    // 4. Rule-based Natural Language Assistant Engine
-    const matches = await UnifiedDataService.matchPropertiesForAssistant(parsedCriteria);
+    // 4. Rule-based Natural Language Assistant Engine (Backup & Demo)
+    const matches = await UnifiedDataService.matchPropertiesForAssistant(parsedCriteria, targetOrgId);
 
     let assistantResponse = '';
     const hasOperation = !!parsedCriteria.operation;
@@ -206,13 +231,13 @@ ${JSON.stringify(matches, null, 2)}
 
     if (matches.length > 0) {
       const opText = parsedCriteria.operation === 'compra' ? 'en venta' : parsedCriteria.operation === 'arriendo' ? 'en arrendamiento' : 'disponibles';
-      assistantResponse = `¡Excelente! He consultado nuestro inventario inmobiliario y encontré ${matches.length} ${matches.length === 1 ? 'opción compatible' : 'opciones compatibles'} con tu búsqueda ${opText}:\n\n` +
+      assistantResponse = `¡Excelente! He consultado el inventario de ${org.name} y encontré ${matches.length} ${matches.length === 1 ? 'inmueble confirmado' : 'inmuebles confirmados'} con tu búsqueda ${opText}:\n\n` +
         matches.map((p, i) => `${i + 1}. **${p.title}** (${p.code}) en **${p.municipality} - ${p.zone}**: ${new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(p.priceCOP)} (${p.areaM2}m², ${p.bedrooms} alcobas, ${p.bathrooms} baños).`).join('\n') +
-        `\n\n¿Te gustaría que agendemos una visita presencial a alguno de estos inmuebles? Si es así, por favor haz clic en "Solicitar Asesoría Humana" o déjame tu nombre, teléfono y correo electrónico.`;
+        `\n\n¿Te gustaría agendar una visita a alguno de estos inmuebles? Haz clic en "Solicitar Asesoría Humana" o déjame tu nombre y teléfono para coordinar con un asesor.`;
     } else if (hasOperation || hasType || hasLocation || hasBudget) {
-      assistantResponse = `He revisado nuestro catálogo en tiempo real y actualmente no tenemos inmuebles que coincidan exactamente con esos parámetros de búsqueda.\n\nSin embargo, nuestro equipo comercial cuenta con opciones privadas y proyectos sobre planos. ¿Te gustaría dejarme tu nombre, teléfono y correo para que un asesor te contacte con opciones personalizadas?`;
+      assistantResponse = `He revisado nuestro catálogo en tiempo real y actualmente no tenemos inmuebles que coincidan exactamente con esos parámetros de búsqueda en ${org.name}.\n\nSin embargo, nuestro equipo comercial cuenta con opciones privadas y proyectos sobre planos. ¿Te gustaría dejarme tu nombre, teléfono y correo para que un asesor te contacte con opciones personalizadas?`;
     } else {
-      assistantResponse = `¡Hola! Con mucho gusto te ayudo a encontrar tu propiedad ideal. Para recomendarte las mejores opciones de nuestro inventario, cuéntame:\n\n1. ¿Estás buscando **comprar** o **arrendar**?\n2. ¿Qué tipo de inmueble prefieres (apartamento, casa, apartaestudio, oficina, etc.)?\n3. ¿En qué ciudad o zona (ej. El Poblado, Laureles, Belén, Envigado, Chapinero)?\n4. ¿Cuál es tu presupuesto estimado?`;
+      assistantResponse = `¡Hola! Soy ${org.aiAssistantName} de ${org.name}. Con mucho gusto te ayudo a encontrar tu propiedad ideal. Para recomendarte las mejores opciones de nuestro inventario, cuéntame:\n\n1. ¿Estás buscando **comprar** o **arrendar**?\n2. ¿Qué tipo de inmueble prefieres (apartamento, casa, apartaestudio, oficina, etc.)?\n3. ¿En qué ciudad o zona (ej. El Poblado, Laureles, Belén, Envigado, Chapinero)?\n4. ¿Cuál es tu presupuesto estimado?`;
     }
 
     return NextResponse.json({
@@ -222,6 +247,7 @@ ${JSON.stringify(matches, null, 2)}
       response: assistantResponse,
       matchedProperties: matches,
       updatedCriteria: parsedCriteria,
+      organizationId: targetOrgId,
     });
   } catch (error: any) {
     console.error('Error in AI assistant route:', error);

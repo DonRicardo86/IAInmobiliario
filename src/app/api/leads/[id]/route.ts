@@ -39,17 +39,23 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     }
 
     if (body.activity) {
-      const updated = await UnifiedDataService.addLeadActivity(
+      await UnifiedDataService.addLeadActivity(
         id,
         body.activity.description,
         body.activity.type || 'note_added',
         body.activity.author || 'Asesor'
       );
-      return NextResponse.json({ success: true, lead: updated });
     }
 
-    const updated = await UnifiedDataService.updateLead(id, body);
-    return NextResponse.json({ success: true, lead: updated });
+    const { activity, ...updates } = body;
+    let updatedLead = null;
+    if (Object.keys(updates).length > 0) {
+      updatedLead = await UnifiedDataService.updateLead(id, updates);
+    } else {
+      updatedLead = await UnifiedDataService.getLeadById(id);
+    }
+
+    return NextResponse.json({ success: true, lead: updatedLead });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 400 });
   }

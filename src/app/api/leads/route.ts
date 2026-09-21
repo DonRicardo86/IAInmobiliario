@@ -65,9 +65,30 @@ export async function POST(req: NextRequest) {
     }
 
     const authSession = await authenticateAdminRequest(req);
+    const targetOrgId = authSession?.organizationId || body.organizationId || DEFAULT_ORGANIZATION.id;
+
+    // Check duplicate
+    if (body.email || body.phone) {
+      const existing = await UnifiedDataService.findDuplicateLead(body.email || '', body.phone || '', targetOrgId);
+      if (existing && !body.allowDuplicate) {
+        const updated = await UnifiedDataService.addLeadActivity(
+          existing.id,
+          `Nueva interacción registrada desde formulario web. Notas: ${body.notes || 'Consulta recurrente'}`,
+          'contact_attempt',
+          'Sistema'
+        );
+        return NextResponse.json({
+          success: true,
+          lead: updated,
+          duplicateDetected: true,
+          demoMode: !authSession,
+        }, { status: 200 });
+      }
+    }
+
     const newLead = await UnifiedDataService.createLead({
       ...body,
-      organizationId: authSession?.organizationId || body.organizationId || DEFAULT_ORGANIZATION.id,
+      organizationId: targetOrgId,
       consentHabeasData: body.consentHabeasData !== false,
     });
 

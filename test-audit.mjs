@@ -126,8 +126,8 @@ async function runComprehensiveAudit() {
     {
       leadCapture: {
         name: 'Camila Restrepo Moreno',
-        phone: '+57 301 555 4321',
-        email: 'camila.restrepo@empresa.com.co',
+        phone: `+57 301 ${Date.now().toString().slice(-6)}`,
+        email: `camila.restrepo-${Date.now()}@empresa.com.co`,
         criteria: {
           operation: 'arriendo',
           propertyType: 'apartamento',
@@ -169,8 +169,8 @@ async function runComprehensiveAudit() {
     },
     {
       name: 'Dr. Guillermo Valencia (Inmobiliaria Santa María)',
-      phone: '+57 310 444 8899',
-      email: 'gerencia@santamaria.com.co',
+      phone: `+57 310 ${Date.now().toString().slice(-6)}`,
+      email: `gerencia-${Date.now()}@santamaria.com.co`,
       operationType: 'compra',
       propertyType: 'oficina',
       municipality: 'Bogotá',

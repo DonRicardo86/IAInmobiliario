@@ -106,16 +106,19 @@ export class UnifiedDataService {
     return ServerStore.getPublicProperties(filters, organizationId);
   }
 
-  static async matchPropertiesForAssistant(criteria: {
-    operation?: 'compra' | 'arriendo';
-    propertyType?: string;
-    municipality?: string;
-    zone?: string;
-    maxBudget?: number;
-    minBedrooms?: number;
-    requiredFeatures?: string[];
-  }): Promise<PropertyPublicView[]> {
-    const catalog = await this.getPublicProperties({}, DEFAULT_ORGANIZATION.id);
+  static async matchPropertiesForAssistant(
+    criteria: {
+      operation?: 'compra' | 'arriendo';
+      propertyType?: string;
+      municipality?: string;
+      zone?: string;
+      maxBudget?: number;
+      minBedrooms?: number;
+      requiredFeatures?: string[];
+    },
+    organizationId: string = DEFAULT_ORGANIZATION.id
+  ): Promise<PropertyPublicView[]> {
+    const catalog = await this.getPublicProperties({}, organizationId);
 
     return catalog.filter((p) => {
       if (criteria.operation && p.operation !== criteria.operation) return false;
@@ -362,7 +365,64 @@ export class UnifiedDataService {
   }
 
   static async getStats(organizationId: string = DEFAULT_ORGANIZATION.id): Promise<LeadStats> {
-    return ServerStore.getStats(organizationId);
+    const leads = await this.getLeads({}, organizationId);
+
+    const byStatus: Record<string, number> = {
+      nuevo: 0,
+      contactado: 0,
+      interesado: 0,
+      visita_agendada: 0,
+      negociacion: 0,
+      cerrado: 0,
+      no_interesado: 0,
+    };
+
+    const byPriority: Record<string, number> = {
+      alto: 0,
+      medio: 0,
+      bajo: 0,
+    };
+
+    const byOperation: Record<string, number> = {
+      compra: 0,
+      arriendo: 0,
+    };
+
+    let totalPipelineValue = 0;
+
+    for (const lead of leads) {
+      if (byStatus[lead.status] !== undefined) byStatus[lead.status]++;
+      if (byPriority[lead.priority] !== undefined) byPriority[lead.priority]++;
+      if (byOperation[lead.operationType] !== undefined) byOperation[lead.operationType]++;
+
+      if (lead.status !== 'cerrado' && lead.status !== 'no_interesado') {
+        totalPipelineValue += lead.budget || 0;
+      }
+    }
+
+    const closedCount = byStatus.cerrado || 0;
+    const totalCount = leads.length;
+    const conversionRate = totalCount > 0 ? (closedCount / totalCount) * 100 : 0;
+    const pendingOpportunities =
+      (byStatus.nuevo || 0) +
+      (byStatus.contactado || 0) +
+      (byStatus.interesado || 0) +
+      (byStatus.negociacion || 0) +
+      (byStatus.visita_agendada || 0);
+
+    return {
+      total: totalCount,
+      byStatus: byStatus as any,
+      byPriority: byPriority as any,
+      byOperation: byOperation as any,
+      conversionRate: Math.round(conversionRate * 10) / 10,
+      totalPipelineValue,
+      highPriorityCount: byPriority.alto || 0,
+      newLeadsCount: byStatus.nuevo || 0,
+      scheduledVisitsCount: byStatus.visita_agendada || 0,
+      closedDealsCount: closedCount,
+      pendingOpportunitiesCount: pendingOpportunities,
+    };
   }
 
   static resetDatabase(): void {
