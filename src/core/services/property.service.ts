@@ -103,7 +103,9 @@ export class PropertyService {
       body: JSON.stringify(payload),
     });
     const resData = await res.json();
-    if (!resData.success) throw new Error(resData.error || 'Error al crear inmueble');
+    if (!res.ok || !resData.success) {
+      throw new Error(resData.error || `Error del servidor (${res.status}): No se pudo guardar el inmueble.`);
+    }
     return resData.property;
   }
 
@@ -118,7 +120,9 @@ export class PropertyService {
       body: JSON.stringify(updates),
     });
     const resData = await res.json();
-    if (!resData.success) throw new Error(resData.error || 'Error al actualizar inmueble');
+    if (!res.ok || !resData.success) {
+      throw new Error(resData.error || `Error del servidor (${res.status}): No se pudo actualizar el inmueble.`);
+    }
     return resData.property;
   }
 
@@ -135,6 +139,9 @@ export class PropertyService {
       },
     });
     const resData = await res.json();
+    if (!res.ok || !resData.success) {
+      throw new Error(resData.error || `Error del servidor (${res.status}): No se pudo eliminar el inmueble.`);
+    }
     return !!resData.success;
   }
 

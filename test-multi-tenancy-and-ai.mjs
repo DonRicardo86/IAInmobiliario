@@ -38,9 +38,14 @@ async function runComprehensiveTests() {
     });
     let data;
     try {
-      data = await res.json();
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
     } catch {
-      data = await res.text();
+      data = null;
     }
     return { status: res.status, data };
   }

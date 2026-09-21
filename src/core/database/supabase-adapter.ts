@@ -95,6 +95,7 @@ export class UnifiedDataService {
     authToken?: string
   ): Promise<Property[]> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
     if (supabase) {
       try {
         let query = supabase
@@ -122,10 +123,20 @@ export class UnifiedDataService {
         if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabasePropertyToDomain);
         }
-        if (error) throw error;
+        if (error) {
+          console.error('[SupabaseAdapter] Properties query error:', error);
+          if (isProduction) {
+            throw new Error(`Error al consultar inventario en Supabase: ${error.message}`);
+          }
+        }
       } catch (err) {
+        if (isProduction) throw err;
         console.error('[SupabaseAdapter] Fallback to ServerStore on properties error', err);
       }
+    }
+
+    if (isProduction) {
+      return [];
     }
 
     return ServerStore.getProperties(filters, organizationId);
@@ -235,48 +246,60 @@ export class UnifiedDataService {
 
   static async createProperty(propertyData: CreatePropertyInput, authToken?: string): Promise<Property> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
     const targetOrgId = propertyData.organizationId || DEFAULT_ORGANIZATION.id;
     const payloadWithOrg = {
       ...propertyData,
       organizationId: targetOrgId,
     };
-    if (supabase) {
-      try {
-        const payload = this.mapDomainPropertyToSupabase(payloadWithOrg);
-        const { internal_address, assigned_agent, ...propertyPayload } = payload;
 
-        const { data, error } = await supabase
-          .from('properties')
-          .insert(propertyPayload)
+    if (supabase) {
+      const payload = this.mapDomainPropertyToSupabase(payloadWithOrg);
+      const { internal_address, assigned_agent, ...propertyPayload } = payload;
+
+      const { data, error } = await supabase
+        .from('properties')
+        .insert(propertyPayload)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('[SupabaseAdapter] Create property error in Supabase:', error);
+        throw new Error(`Error en Supabase al registrar inmueble: ${error.message || error.details || JSON.stringify(error)}`);
+      }
+
+      if (data) {
+        const privateData = {
+          property_id: data.id,
+          organization_id: data.organization_id,
+          internal_address: internal_address || propertyData.internalAddress || 'Sin dirección registrada',
+          assigned_agent: assigned_agent || propertyData.assignedAgent || 'Sin Asignar',
+        };
+
+        const { data: privResp, error: privError } = await supabase
+          .from('property_private_details')
+          .insert(privateData)
           .select()
           .single();
 
-        if (error) throw error;
-        if (data) {
-          const privateData = {
-            property_id: data.id,
-            organization_id: data.organization_id,
-            internal_address: internal_address || propertyData.internalAddress || 'Sin dirección registrada',
-            assigned_agent: assigned_agent || propertyData.assignedAgent || 'Sin Asignar',
-          };
-
-          const { data: privResp } = await supabase
-            .from('property_private_details')
-            .insert(privateData)
-            .select()
-            .single();
-
-          return this.mapSupabasePropertyToDomain({
-            ...data,
-            property_private_details: privResp ? [privResp] : [{
-              internal_address: privateData.internal_address,
-              assigned_agent: privateData.assigned_agent,
-            }],
-          });
+        if (privError) {
+          console.error('[SupabaseAdapter] Error inserting property_private_details:', privError);
+          await supabase.from('properties').delete().eq('id', data.id);
+          throw new Error(`Error al registrar detalles privados del inmueble: ${privError.message}`);
         }
-      } catch (e) {
-        console.error('[SupabaseAdapter] Create property error in Supabase, using ServerStore', e);
+
+        return this.mapSupabasePropertyToDomain({
+          ...data,
+          property_private_details: privResp ? [privResp] : [{
+            internal_address: privateData.internal_address,
+            assigned_agent: privateData.assigned_agent,
+          }],
+        });
       }
+    }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor para persistir propiedades.');
     }
 
     return ServerStore.createProperty(payloadWithOrg);
@@ -284,35 +307,45 @@ export class UnifiedDataService {
 
   static async updateProperty(id: string, updates: Partial<Property>, authToken?: string): Promise<Property> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
-      try {
-        const payload = this.mapDomainPropertyToSupabase(updates);
-        const { internal_address, assigned_agent, ...propertyPayload } = payload;
+      const payload = this.mapDomainPropertyToSupabase(updates);
+      const { internal_address, assigned_agent, ...propertyPayload } = payload;
 
-        if (Object.keys(propertyPayload).length > 0) {
-          const { error } = await supabase
-            .from('properties')
-            .update(propertyPayload)
-            .eq('id', id);
-          if (error) throw error;
+      if (Object.keys(propertyPayload).length > 0) {
+        const { error } = await supabase
+          .from('properties')
+          .update(propertyPayload)
+          .eq('id', id);
+        if (error) {
+          console.error('[SupabaseAdapter] Update property error in Supabase:', error);
+          throw new Error(`Error al actualizar inmueble en Supabase: ${error.message}`);
         }
-
-        if (internal_address !== undefined || assigned_agent !== undefined) {
-          const privUpdates: any = {};
-          if (internal_address !== undefined) privUpdates.internal_address = internal_address;
-          if (assigned_agent !== undefined) privUpdates.assigned_agent = assigned_agent;
-
-          await supabase
-            .from('property_private_details')
-            .update(privUpdates)
-            .eq('property_id', id);
-        }
-
-        const fresh = await this.getPropertyById(id, authToken);
-        if (fresh) return fresh;
-      } catch (e) {
-        console.error('[SupabaseAdapter] Update property error in Supabase', e);
       }
+
+      if (internal_address !== undefined || assigned_agent !== undefined) {
+        const privUpdates: any = {};
+        if (internal_address !== undefined) privUpdates.internal_address = internal_address;
+        if (assigned_agent !== undefined) privUpdates.assigned_agent = assigned_agent;
+
+        const { error: privError } = await supabase
+          .from('property_private_details')
+          .update(privUpdates)
+          .eq('property_id', id);
+
+        if (privError) {
+          console.error('[SupabaseAdapter] Update property_private_details error:', privError);
+          throw new Error(`Error al actualizar detalles privados: ${privError.message}`);
+        }
+      }
+
+      const fresh = await this.getPropertyById(id, authToken);
+      if (fresh) return fresh;
+    }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor.');
     }
 
     return ServerStore.updateProperty(id, updates);
@@ -320,14 +353,21 @@ export class UnifiedDataService {
 
   static async deleteProperty(id: string, authToken?: string): Promise<boolean> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
-      try {
-        const { error } = await supabase.from('properties').delete().eq('id', id);
-        if (!error) return true;
-      } catch (e) {
-        // Fallback
+      const { error } = await supabase.from('properties').delete().eq('id', id);
+      if (error) {
+        console.error('[SupabaseAdapter] Delete property error in Supabase:', error);
+        throw new Error(`Error al eliminar inmueble en Supabase: ${error.message}`);
       }
+      return true;
     }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor.');
+    }
+
     return ServerStore.deleteProperty(id);
   }
 
@@ -338,6 +378,8 @@ export class UnifiedDataService {
     authToken?: string
   ): Promise<Lead[]> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
       try {
         let query = supabase
@@ -356,10 +398,20 @@ export class UnifiedDataService {
         if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabaseLeadToDomain);
         }
-        if (error) throw error;
+        if (error) {
+          console.error('[SupabaseAdapter] Leads query error:', error);
+          if (isProduction) {
+            throw new Error(`Error al consultar prospectos en Supabase: ${error.message}`);
+          }
+        }
       } catch (e) {
+        if (isProduction) throw e;
         console.error('[SupabaseAdapter] Leads query fallback to ServerStore', e);
       }
+    }
+
+    if (isProduction) {
+      return [];
     }
 
     return ServerStore.getLeads(filters, organizationId);
@@ -415,34 +467,40 @@ export class UnifiedDataService {
 
   static async createLead(leadData: CreateLeadInput, authToken?: string): Promise<Lead> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
     const targetOrgId = leadData.organizationId || DEFAULT_ORGANIZATION.id;
     const payloadWithDefaults = {
       ...leadData,
       organizationId: targetOrgId,
       currency: leadData.currency || 'COP',
     };
+
     if (supabase) {
-      try {
-        const payload = this.mapDomainLeadToSupabase(payloadWithDefaults);
-        const { data, error } = await supabase
-          .from('leads')
-          .insert(payload)
-          .select()
-          .single();
-        if (!error && data) {
-          if (leadData.notes) {
-            await supabase.from('lead_activities').insert({
-              lead_id: data.id,
-              description: `Prospecto registrado: ${leadData.notes}`,
-              type: 'created',
-              author: leadData.assignedAgent || 'Sistema',
-            });
-          }
-          return this.mapSupabaseLeadToDomain({ ...data, lead_activities: [] });
-        }
-      } catch (e) {
-        console.error('[SupabaseAdapter] Create lead error in Supabase, using ServerStore', e);
+      const payload = this.mapDomainLeadToSupabase(payloadWithDefaults);
+      const { data, error } = await supabase
+        .from('leads')
+        .insert(payload)
+        .select()
+        .single();
+      if (error) {
+        console.error('[SupabaseAdapter] Create lead error in Supabase:', error);
+        throw new Error(`Error al registrar prospecto en Supabase: ${error.message}`);
       }
+      if (data) {
+        if (leadData.notes) {
+          await supabase.from('lead_activities').insert({
+            lead_id: data.id,
+            description: `Prospecto registrado: ${leadData.notes}`,
+            type: 'created',
+            author: leadData.assignedAgent || 'Sistema',
+          });
+        }
+        return this.mapSupabaseLeadToDomain({ ...data, lead_activities: [] });
+      }
+    }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor para registrar prospectos.');
     }
 
     return ServerStore.createLead(payloadWithDefaults);
@@ -450,21 +508,27 @@ export class UnifiedDataService {
 
   static async updateLead(id: string, updates: Partial<Lead>, authToken?: string): Promise<Lead> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
-      try {
-        const payload = this.mapDomainLeadToSupabase(updates);
-        const { data, error } = await supabase
-          .from('leads')
-          .update(payload)
-          .eq('id', id)
-          .select('*, lead_activities(*)')
-          .single();
-        if (!error && data) {
-          return this.mapSupabaseLeadToDomain(data);
-        }
-      } catch (e) {
-        console.error('[SupabaseAdapter] Update lead error in Supabase', e);
+      const payload = this.mapDomainLeadToSupabase(updates);
+      const { data, error } = await supabase
+        .from('leads')
+        .update(payload)
+        .eq('id', id)
+        .select('*, lead_activities(*)')
+        .single();
+      if (error) {
+        console.error('[SupabaseAdapter] Update lead error in Supabase:', error);
+        throw new Error(`Error al actualizar prospecto en Supabase: ${error.message}`);
       }
+      if (data) {
+        return this.mapSupabaseLeadToDomain(data);
+      }
+    }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor.');
     }
 
     return ServerStore.updateLead(id, updates);
@@ -478,19 +542,25 @@ export class UnifiedDataService {
     authToken?: string
   ): Promise<Lead> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
-      try {
-        await supabase.from('lead_activities').insert({
-          lead_id: leadId,
-          description,
-          type,
-          author,
-        });
-        const updated = await this.getLeadById(leadId, authToken);
-        if (updated) return updated;
-      } catch (e) {
-        // Fallback
+      const { error } = await supabase.from('lead_activities').insert({
+        lead_id: leadId,
+        description,
+        type,
+        author,
+      });
+      if (error) {
+        console.error('[SupabaseAdapter] Add lead activity error:', error);
+        if (isProduction) throw new Error(`Error al registrar actividad: ${error.message}`);
       }
+      const updated = await this.getLeadById(leadId, authToken);
+      if (updated) return updated;
+    }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor.');
     }
 
     return ServerStore.addLeadActivity(leadId, description, type, author);
@@ -498,14 +568,21 @@ export class UnifiedDataService {
 
   static async deleteLead(id: string, authToken?: string): Promise<boolean> {
     const supabase = getSupabaseClient(authToken);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
     if (supabase) {
-      try {
-        const { error } = await supabase.from('leads').delete().eq('id', id);
-        if (!error) return true;
-      } catch (e) {
-        // Fallback
+      const { error } = await supabase.from('leads').delete().eq('id', id);
+      if (error) {
+        console.error('[SupabaseAdapter] Delete lead error in Supabase:', error);
+        throw new Error(`Error al eliminar prospecto en Supabase: ${error.message}`);
       }
+      return true;
     }
+
+    if (isProduction) {
+      throw new Error('Supabase no está configurado en el servidor.');
+    }
+
     return ServerStore.deleteLead(id);
   }
 
@@ -640,22 +717,39 @@ export class UnifiedDataService {
     if (p.organizationId) res.organization_id = p.organizationId;
     if (p.code) res.code = p.code;
     if (p.title) res.title = p.title;
-    if (p.description) res.description = p.description;
+    res.description = p.description && p.description.trim() ? p.description.trim() : (p.title || 'Inmueble registrado');
     if (p.type) res.type = p.type;
     if (p.operation) res.operation = p.operation;
     if (p.municipality) res.municipality = p.municipality;
     if (p.zone) res.zone = p.zone;
     if (p.internalAddress) res.internal_address = p.internalAddress;
-    if (p.priceCOP !== undefined) res.price_cop = p.priceCOP;
-    if (p.adminFeeCOP !== undefined) res.admin_fee_cop = p.adminFeeCOP;
-    if (p.areaM2 !== undefined) res.area_m2 = p.areaM2;
-    if (p.bedrooms !== undefined) res.bedrooms = p.bedrooms;
-    if (p.bathrooms !== undefined) res.bathrooms = p.bathrooms;
-    if (p.parkingSpots !== undefined) res.parking_spots = p.parkingSpots;
-    if (p.stratum !== undefined) res.stratum = p.stratum;
-    if (p.features) res.features = p.features;
-    if (p.images) res.images = p.images;
+    if (p.priceCOP !== undefined && p.priceCOP !== null && p.priceCOP !== '') {
+      res.price_cop = Number(p.priceCOP);
+    }
+    if (p.adminFeeCOP !== undefined && p.adminFeeCOP !== null && p.adminFeeCOP !== '') {
+      res.admin_fee_cop = Number(p.adminFeeCOP);
+    } else {
+      res.admin_fee_cop = 0;
+    }
+    if (p.areaM2 !== undefined && p.areaM2 !== null && p.areaM2 !== '') {
+      res.area_m2 = Number(p.areaM2);
+    }
+    if (p.bedrooms !== undefined && p.bedrooms !== null && p.bedrooms !== '') {
+      res.bedrooms = Number(p.bedrooms);
+    }
+    if (p.bathrooms !== undefined && p.bathrooms !== null && p.bathrooms !== '') {
+      res.bathrooms = Number(p.bathrooms);
+    }
+    if (p.parkingSpots !== undefined && p.parkingSpots !== null && p.parkingSpots !== '') {
+      res.parking_spots = Number(p.parkingSpots);
+    }
+    if (p.stratum !== undefined && p.stratum !== null && p.stratum !== '') {
+      res.stratum = Number(p.stratum);
+    }
+    if (p.features) res.features = Array.isArray(p.features) ? p.features : [];
+    if (p.images) res.images = Array.isArray(p.images) ? p.images : [];
     if (p.status) res.status = p.status;
+    if (p.featured !== undefined) res.featured = Boolean(p.featured);
     if (p.assignedAgent) res.assigned_agent = p.assignedAgent;
     return res;
   }

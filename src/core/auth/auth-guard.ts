@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabaseClient } from '../database/supabase-adapter';
+import { getSupabaseClient, getSupabaseUserClient } from '../database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
 
 export type UserRole = 'owner' | 'admin' | 'agent' | 'viewer';
@@ -107,39 +107,68 @@ export async function authenticateAdminRequest(req: NextRequest): Promise<AuthSe
     }
   }
 
-  // 2. Validate with Supabase Auth if Supabase client is configured
-  const supabase = getSupabaseClient();
-  if (supabase && authHeader) {
-    try {
-      const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-      const { data: { user }, error } = await supabase.auth.getUser(token);
-      if (!error && user) {
-        // Look up verified organization membership in organization_members table
-        let verifiedOrgId = user.app_metadata?.organization_id;
-        let verifiedRole = (user.app_metadata?.role as UserRole) || 'agent';
+  // 2. Validate with Supabase Auth using the user's JWT client
+  if (authHeader) {
+    const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+    const userClient = getSupabaseUserClient(token);
+    if (userClient) {
+      try {
+        const { data: { user }, error: userError } = await userClient.auth.getUser(token);
+        if (!userError && user) {
+          // Look up verified organization membership in organization_members table using the authenticated userClient
+          let verifiedOrgId = user.app_metadata?.organization_id;
+          let verifiedRole = (user.app_metadata?.role as UserRole) || undefined;
 
-        if (!verifiedOrgId) {
-          const { data: member } = await supabase
-            .from('organization_members')
-            .select('organization_id, role')
-            .eq('user_id', user.id)
-            .limit(1)
-            .maybeSingle();
+          if (!verifiedOrgId) {
+            const { data: member, error: memberError } = await userClient
+              .from('organization_members')
+              .select('organization_id, role')
+              .eq('user_id', user.id)
+              .limit(1)
+              .maybeSingle();
 
-          if (member) {
-            verifiedOrgId = member.organization_id;
-            verifiedRole = member.role as UserRole;
+            if (member && !memberError) {
+              verifiedOrgId = member.organization_id;
+              verifiedRole = member.role as UserRole;
+            }
           }
-        }
 
-        return {
-          userId: user.id,
-          organizationId: verifiedOrgId || DEFAULT_ORGANIZATION.id,
-          role: verifiedRole || 'agent',
-        };
+          // If not found in organization_members, check if the user belongs to an organization via public.organizations
+          if (!verifiedOrgId) {
+            const { data: orgs } = await userClient
+              .from('organizations')
+              .select('id')
+              .limit(1);
+
+            if (orgs && orgs.length > 0) {
+              verifiedOrgId = orgs[0].id;
+              verifiedRole = verifiedRole || 'owner';
+            }
+          }
+
+          if (verifiedOrgId) {
+            return {
+              userId: user.id,
+              organizationId: verifiedOrgId,
+              role: verifiedRole || 'owner',
+            };
+          }
+
+          // In production, reject if user has no valid organization in Supabase
+          if (isProduction) {
+            console.error('[AuthGuard] Authenticated Supabase user has no organization in Supabase:', user.id);
+            return null;
+          }
+
+          return {
+            userId: user.id,
+            organizationId: DEFAULT_ORGANIZATION.id,
+            role: verifiedRole || 'agent',
+          };
+        }
+      } catch (e) {
+        console.error('[AuthGuard] Token validation error:', e);
       }
-    } catch (e) {
-      console.error('[AuthGuard] Token validation error:', e);
     }
   }
 
