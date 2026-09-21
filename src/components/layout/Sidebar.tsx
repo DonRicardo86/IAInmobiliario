@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -16,7 +16,9 @@ import {
   Globe,
   ExternalLink,
   Bot,
+  LogIn,
 } from 'lucide-react';
+import { getSupabaseBrowserClient } from '@/core/auth/supabase-browser';
 
 interface SidebarProps {
   onNewLeadClick?: () => void;
@@ -24,6 +26,26 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ onNewLeadClick }) => {
   const pathname = usePathname();
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user) {
+          setCurrentUser(session.user);
+        }
+      });
+
+      const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+        setCurrentUser(session?.user || null);
+      });
+
+      return () => {
+        authListener?.subscription?.unsubscribe();
+      };
+    }
+  }, []);
 
   const navItems = [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -323,7 +345,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onNewLeadClick }) => {
             width: '34px',
             height: '34px',
             borderRadius: '50%',
-            backgroundColor: 'var(--primary-light)',
+            backgroundColor: currentUser ? '#10b981' : 'var(--primary-light)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -332,14 +354,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ onNewLeadClick }) => {
             color: '#ffffff',
           }}
         >
-          IP
+          {currentUser ? 'IP' : 'DEMO'}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Inmobiliaria Premier
+            {currentUser ? 'Inmobiliaria Piloto' : 'Inmobiliaria Premier'}
           </p>
-          <p style={{ fontSize: '0.72rem', color: 'var(--accent-emerald)', margin: 0 }}>
-            ● Modo Demo / Local
+          <p style={{ fontSize: '0.72rem', color: currentUser ? 'var(--accent-emerald)' : 'var(--text-muted)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {currentUser ? `● ${currentUser.email}` : '● Modo Demo / Local'}
           </p>
         </div>
       </div>

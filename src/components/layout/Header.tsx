@@ -1,8 +1,11 @@
 'use client';
 
-import React from 'react';
-import { Search, Plus, RotateCcw, Sparkles, PhoneCall } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { Search, Plus, RotateCcw, Sparkles, LogIn, LogOut, User, CheckCircle2 } from 'lucide-react';
 import { Button } from '../ui/Button';
+import { getSupabaseBrowserClient } from '@/core/auth/supabase-browser';
 
 interface HeaderProps {
   onNewLeadClick: () => void;
@@ -19,6 +22,37 @@ export const Header: React.FC<HeaderProps> = ({
   onSearchChange,
   title,
 }) => {
+  const router = useRouter();
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user) {
+          setCurrentUser(session.user);
+        }
+      });
+
+      const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+        setCurrentUser(session?.user || null);
+      });
+
+      return () => {
+        authListener?.subscription?.unsubscribe();
+      };
+    }
+  }, []);
+
+  const handleSignOut = async () => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      await supabase.auth.signOut();
+      setCurrentUser(null);
+      router.push('/login');
+    }
+  };
+
   return (
     <header
       style={{
@@ -42,26 +76,48 @@ export const Header: React.FC<HeaderProps> = ({
             <h1 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>
               {title || 'Panel Comercial Inmobiliario'}
             </h1>
-            <span
-              style={{
-                fontSize: '0.7rem',
-                fontWeight: 700,
-                color: '#38bdf8',
-                backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                border: '1px solid rgba(56, 189, 248, 0.3)',
-                padding: '0.15rem 0.5rem',
-                borderRadius: 'var(--radius-full)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.25rem',
-              }}
-            >
-              <Sparkles size={11} />
-              Demostración Guiada
-            </span>
+            {currentUser ? (
+              <span
+                style={{
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  color: '#34d399',
+                  backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                  padding: '0.15rem 0.5rem',
+                  borderRadius: 'var(--radius-full)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.25rem',
+                }}
+              >
+                <CheckCircle2 size={11} />
+                Inmobiliaria Piloto (Owner)
+              </span>
+            ) : (
+              <span
+                style={{
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  color: '#38bdf8',
+                  backgroundColor: 'rgba(56, 189, 248, 0.12)',
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                  padding: '0.15rem 0.5rem',
+                  borderRadius: 'var(--radius-full)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.25rem',
+                }}
+              >
+                <Sparkles size={11} />
+                Demostración Guiada
+              </span>
+            )}
           </div>
           <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-            Inmobiliaria Premier (Entorno Demo) — Datos aislados de muestra
+            {currentUser
+              ? `Sesión activa: ${currentUser.email}`
+              : 'Inmobiliaria Premier (Entorno Demo) — Datos aislados de muestra'}
           </span>
         </div>
       </div>
@@ -72,7 +128,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div
             style={{
               position: 'relative',
-              width: '280px',
+              width: '240px',
               display: 'flex',
               alignItems: 'center',
             }}
@@ -88,7 +144,7 @@ export const Header: React.FC<HeaderProps> = ({
             />
             <input
               type="text"
-              placeholder="Buscar prospecto, zona, teléfono..."
+              placeholder="Buscar prospecto, zona..."
               value={searchTerm || ''}
               onChange={(e) => onSearchChange(e.target.value)}
               style={{
@@ -105,7 +161,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {onResetDataClick && (
+        {onResetDataClick && !currentUser && (
           <Button
             variant="ghost"
             size="sm"
@@ -126,6 +182,66 @@ export const Header: React.FC<HeaderProps> = ({
         >
           Nuevo Prospecto
         </Button>
+
+        {/* Auth / Profile Link */}
+        {currentUser ? (
+          <button
+            onClick={handleSignOut}
+            title={`Cerrar sesión (${currentUser.email})`}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+              padding: '0.45rem 0.75rem',
+              backgroundColor: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: 'var(--radius-md)',
+              color: '#f87171',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all var(--transition-fast)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.25)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.12)';
+            }}
+          >
+            <LogOut size={14} />
+            <span>Salir</span>
+          </button>
+        ) : (
+          <Link
+            href="/login"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+              padding: '0.45rem 0.75rem',
+              backgroundColor: 'rgba(79, 70, 229, 0.15)',
+              border: '1px solid rgba(79, 70, 229, 0.3)',
+              borderRadius: 'var(--radius-md)',
+              color: '#818cf8',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              textDecoration: 'none',
+              transition: 'all var(--transition-fast)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = 'rgba(79, 70, 229, 0.25)';
+              e.currentTarget.style.color = '#ffffff';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'rgba(79, 70, 229, 0.15)';
+              e.currentTarget.style.color = '#818cf8';
+            }}
+          >
+            <LogIn size={14} />
+            <span>Iniciar Sesión</span>
+          </Link>
+        )}
       </div>
     </header>
   );

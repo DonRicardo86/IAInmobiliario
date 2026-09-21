@@ -10,12 +10,19 @@ import {
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const property = await UnifiedDataService.getPropertyById(id);
+    const authHeader = req.headers.get('authorization') || undefined;
+    const property = await UnifiedDataService.getPropertyById(id, authHeader);
     if (!property) {
       return NextResponse.json({ success: false, error: 'Inmueble no encontrado' }, { status: 404 });
     }
 
     const authSession = await authenticateAdminRequest(req);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
+    if (!authSession && isProduction) {
+      return unauthorizedResponse('Acceso restringido: Se requiere autenticación para consultar el detalle privado.');
+    }
+
     if (!authSession) {
       return NextResponse.json({
         success: true,
@@ -38,6 +45,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const body = await req.json();
 
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para modificar inmuebles.');
     }
@@ -47,7 +55,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para modificar inmuebles.');
     }
 
-    const updated = await UnifiedDataService.updateProperty(id, body);
+    const updated = await UnifiedDataService.updateProperty(id, body, authHeader);
     return NextResponse.json({ success: true, property: updated });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 400 });
@@ -58,6 +66,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   try {
     const { id } = await params;
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para eliminar inmuebles.');
     }
@@ -67,7 +76,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       return forbiddenResponse('Solo los roles owner y admin tienen permisos para eliminar inmuebles.');
     }
 
-    const deleted = await UnifiedDataService.deleteProperty(id);
+    const deleted = await UnifiedDataService.deleteProperty(id, authHeader);
     return NextResponse.json({ success: deleted });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

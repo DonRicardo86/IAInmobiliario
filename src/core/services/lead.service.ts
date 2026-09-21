@@ -1,5 +1,6 @@
 import { Lead, LeadFilters, LeadPriority, LeadStats, LeadStatus } from '../types/lead';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
+import { getAuthHeader } from '../auth/supabase-browser';
 
 export class LeadService {
   async getLeads(filters?: Partial<LeadFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<Lead[]> {
@@ -12,8 +13,14 @@ export class LeadService {
       if (filters?.municipality && filters.municipality !== 'todas') queryParams.set('municipality', filters.municipality);
       if (filters?.zone && filters.zone !== 'todas') queryParams.set('zone', filters.zone);
       if (filters?.search) queryParams.set('search', filters.search);
+      if (organizationId) queryParams.set('organizationId', organizationId);
 
-      const res = await fetch(`/api/leads?${queryParams.toString()}`);
+      const authHeaders = await getAuthHeader();
+      const res = await fetch(`/api/leads?${queryParams.toString()}`, {
+        headers: {
+          ...authHeaders,
+        },
+      });
       const data = await res.json();
       if (data.success) return data.leads;
       return [];
@@ -25,7 +32,12 @@ export class LeadService {
 
   async getLeadById(id: string): Promise<Lead | null> {
     try {
-      const res = await fetch(`/api/leads/${id}`);
+      const authHeaders = await getAuthHeader();
+      const res = await fetch(`/api/leads/${id}`, {
+        headers: {
+          ...authHeaders,
+        },
+      });
       const data = await res.json();
       if (data.success) return data.lead;
       return null;
@@ -91,11 +103,16 @@ export class LeadService {
       source: data.source || 'manual',
       assignedAgent: data.assignedAgent || 'Laura Gómez',
       consentHabeasData: data.consentHabeasData !== false,
+      allowDuplicate: data.allowDuplicate,
     };
 
+    const authHeaders = await getAuthHeader();
     const res = await fetch('/api/leads', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
       body: JSON.stringify(payload),
     });
     const resData = await res.json();
@@ -104,9 +121,13 @@ export class LeadService {
   }
 
   async updateLead(id: string, updates: Partial<Lead>, authorName = 'Asesor'): Promise<Lead> {
+    const authHeaders = await getAuthHeader();
     const res = await fetch(`/api/leads/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
       body: JSON.stringify(updates),
     });
     const resData = await res.json();
@@ -115,9 +136,13 @@ export class LeadService {
   }
 
   async addNote(id: string, noteContent: string, author = 'Asesor'): Promise<Lead> {
+    const authHeaders = await getAuthHeader();
     const res = await fetch(`/api/leads/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
       body: JSON.stringify({
         activity: {
           type: 'note_added',
@@ -132,20 +157,35 @@ export class LeadService {
   }
 
   async deleteLead(id: string): Promise<boolean> {
+    const authHeaders = await getAuthHeader();
     const res = await fetch(`/api/leads/${id}`, {
       method: 'DELETE',
+      headers: {
+        ...authHeaders,
+      },
     });
     const resData = await res.json();
     return !!resData.success;
   }
 
   async resetData(): Promise<void> {
-    await fetch('/api/demo/reset', { method: 'POST' });
+    const authHeaders = await getAuthHeader();
+    await fetch('/api/demo/reset', {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+      },
+    });
   }
 
   async getDashboardStats(organizationId: string = DEFAULT_ORGANIZATION.id): Promise<LeadStats> {
     try {
-      const res = await fetch('/api/leads');
+      const authHeaders = await getAuthHeader();
+      const res = await fetch('/api/leads', {
+        headers: {
+          ...authHeaders,
+        },
+      });
       const data = await res.json();
       if (data.success && data.stats) return data.stats;
     } catch (e) {
@@ -166,29 +206,24 @@ export class LeadService {
     };
   }
 
-  /**
-   * Business heuristic for lead scoring
-   */
   private calculateInitialPriority(data: {
     budget: number;
-    operationType: 'compra' | 'arriendo';
+    operationType: string;
     notes?: string;
   }): LeadPriority {
     const notesLower = (data.notes || '').toLowerCase();
     const isUrgent =
       notesLower.includes('urgente') ||
       notesLower.includes('inmediato') ||
-      notesLower.includes('preaprobado') ||
-      notesLower.includes('visita');
+      notesLower.includes('ya') ||
+      notesLower.includes('esta semana');
 
-    if (data.operationType === 'compra' && data.budget >= 800000000) return 'alto';
-    if (data.operationType === 'arriendo' && data.budget >= 5000000) return 'alto';
+    if (data.operationType === 'compra' && data.budget >= 700000000) return 'alto';
+    if (data.operationType === 'arriendo' && data.budget >= 4000000) return 'alto';
     if (isUrgent) return 'alto';
+    if (data.budget <= 0) return 'bajo';
 
-    if (data.operationType === 'compra' && data.budget >= 300000000) return 'medio';
-    if (data.operationType === 'arriendo' && data.budget >= 2000000) return 'medio';
-
-    return 'bajo';
+    return 'medio';
   }
 }
 

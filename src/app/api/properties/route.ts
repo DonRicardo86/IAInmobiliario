@@ -46,7 +46,14 @@ export async function GET(req: NextRequest) {
 
     // Admin view: requires authentication
     const authSession = await authenticateAdminRequest(req);
-    const properties = await UnifiedDataService.getProperties(filters, authSession?.organizationId);
+    const authHeader = req.headers.get('authorization') || undefined;
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
+    if (!authSession && isProduction) {
+      return unauthorizedResponse('Acceso restringido: Se requiere autenticación para consultar el inventario privado.');
+    }
+
+    const properties = await UnifiedDataService.getProperties(filters, authSession?.organizationId, authHeader);
 
     // If unauthenticated in demo mode, strictly sanitize private internal addresses
     if (!authSession) {
@@ -69,6 +76,7 @@ export async function POST(req: NextRequest) {
 
     // Authenticate admin request
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para registrar propiedades en el inventario.');
     }
@@ -92,7 +100,7 @@ export async function POST(req: NextRequest) {
     const created = await UnifiedDataService.createProperty({
       ...body,
       organizationId: authSession.organizationId,
-    });
+    }, authHeader);
 
     return NextResponse.json({ success: true, property: created }, { status: 201 });
   } catch (error: any) {

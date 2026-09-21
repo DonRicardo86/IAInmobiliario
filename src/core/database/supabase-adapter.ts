@@ -89,13 +89,17 @@ export function isSupabaseConnected(): boolean {
  */
 export class UnifiedDataService {
   // PROPERTIES
-  static async getProperties(filters?: Partial<PropertyFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<Property[]> {
-    const supabase = getSupabaseClient();
+  static async getProperties(
+    filters?: Partial<PropertyFilters>,
+    organizationId: string = DEFAULT_ORGANIZATION.id,
+    authToken?: string
+  ): Promise<Property[]> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         let query = supabase
           .from('properties')
-          .select('*')
+          .select('*, property_private_details(*)')
           .eq('organization_id', organizationId);
 
         if (filters?.operation && filters.operation !== 'todos') {
@@ -115,10 +119,10 @@ export class UnifiedDataService {
         }
 
         const { data, error } = await query;
-        if (error) throw error;
-        if (data && data.length > 0) {
+        if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabasePropertyToDomain);
         }
+        if (error) throw error;
       } catch (err) {
         console.error('[SupabaseAdapter] Fallback to ServerStore on properties error', err);
       }
@@ -127,7 +131,10 @@ export class UnifiedDataService {
     return ServerStore.getProperties(filters, organizationId);
   }
 
-  static async getPublicProperties(filters?: Partial<PropertyFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<PropertyPublicView[]> {
+  static async getPublicProperties(
+    filters?: Partial<PropertyFilters>,
+    organizationId: string = DEFAULT_ORGANIZATION.id
+  ): Promise<PropertyPublicView[]> {
     const supabase = getSupabaseClient();
     if (supabase) {
       try {
@@ -144,10 +151,10 @@ export class UnifiedDataService {
         }
 
         const { data, error } = await query;
-        if (error) throw error;
-        if (data && data.length > 0) {
+        if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabasePublicPropertyToDomain);
         }
+        if (error) throw error;
       } catch (err) {
         console.error('[SupabaseAdapter] Fallback to ServerStore on public properties error', err);
       }
@@ -204,17 +211,20 @@ export class UnifiedDataService {
     }).slice(0, 3);
   }
 
-  static async getPropertyById(id: string): Promise<Property | null> {
-    const supabase = getSupabaseClient();
+  static async getPropertyById(id: string, authToken?: string): Promise<Property | null> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const { data, error } = await supabase
           .from('properties')
-          .select('*')
+          .select('*, property_private_details(*)')
           .eq('id', id)
-          .single();
+          .maybeSingle();
         if (!error && data) {
           return this.mapSupabasePropertyToDomain(data);
+        }
+        if (!error && !data) {
+          return null;
         }
       } catch (e) {
         // Fallback
@@ -223,22 +233,46 @@ export class UnifiedDataService {
     return ServerStore.getPropertyById(id);
   }
 
-  static async createProperty(propertyData: CreatePropertyInput): Promise<Property> {
-    const supabase = getSupabaseClient();
+  static async createProperty(propertyData: CreatePropertyInput, authToken?: string): Promise<Property> {
+    const supabase = getSupabaseClient(authToken);
+    const targetOrgId = propertyData.organizationId || DEFAULT_ORGANIZATION.id;
     const payloadWithOrg = {
       ...propertyData,
-      organizationId: propertyData.organizationId || DEFAULT_ORGANIZATION.id,
+      organizationId: targetOrgId,
     };
     if (supabase) {
       try {
         const payload = this.mapDomainPropertyToSupabase(payloadWithOrg);
+        const { internal_address, assigned_agent, ...propertyPayload } = payload;
+
         const { data, error } = await supabase
           .from('properties')
-          .insert(payload)
+          .insert(propertyPayload)
           .select()
           .single();
-        if (!error && data) {
-          return this.mapSupabasePropertyToDomain(data);
+
+        if (error) throw error;
+        if (data) {
+          const privateData = {
+            property_id: data.id,
+            organization_id: data.organization_id,
+            internal_address: internal_address || propertyData.internalAddress || 'Sin dirección registrada',
+            assigned_agent: assigned_agent || propertyData.assignedAgent || 'Sin Asignar',
+          };
+
+          const { data: privResp } = await supabase
+            .from('property_private_details')
+            .insert(privateData)
+            .select()
+            .single();
+
+          return this.mapSupabasePropertyToDomain({
+            ...data,
+            property_private_details: privResp ? [privResp] : [{
+              internal_address: privateData.internal_address,
+              assigned_agent: privateData.assigned_agent,
+            }],
+          });
         }
       } catch (e) {
         console.error('[SupabaseAdapter] Create property error in Supabase, using ServerStore', e);
@@ -248,20 +282,34 @@ export class UnifiedDataService {
     return ServerStore.createProperty(payloadWithOrg);
   }
 
-  static async updateProperty(id: string, updates: Partial<Property>): Promise<Property> {
-    const supabase = getSupabaseClient();
+  static async updateProperty(id: string, updates: Partial<Property>, authToken?: string): Promise<Property> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const payload = this.mapDomainPropertyToSupabase(updates);
-        const { data, error } = await supabase
-          .from('properties')
-          .update(payload)
-          .eq('id', id)
-          .select()
-          .single();
-        if (!error && data) {
-          return this.mapSupabasePropertyToDomain(data);
+        const { internal_address, assigned_agent, ...propertyPayload } = payload;
+
+        if (Object.keys(propertyPayload).length > 0) {
+          const { error } = await supabase
+            .from('properties')
+            .update(propertyPayload)
+            .eq('id', id);
+          if (error) throw error;
         }
+
+        if (internal_address !== undefined || assigned_agent !== undefined) {
+          const privUpdates: any = {};
+          if (internal_address !== undefined) privUpdates.internal_address = internal_address;
+          if (assigned_agent !== undefined) privUpdates.assigned_agent = assigned_agent;
+
+          await supabase
+            .from('property_private_details')
+            .update(privUpdates)
+            .eq('property_id', id);
+        }
+
+        const fresh = await this.getPropertyById(id, authToken);
+        if (fresh) return fresh;
       } catch (e) {
         console.error('[SupabaseAdapter] Update property error in Supabase', e);
       }
@@ -270,8 +318,8 @@ export class UnifiedDataService {
     return ServerStore.updateProperty(id, updates);
   }
 
-  static async deleteProperty(id: string): Promise<boolean> {
-    const supabase = getSupabaseClient();
+  static async deleteProperty(id: string, authToken?: string): Promise<boolean> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const { error } = await supabase.from('properties').delete().eq('id', id);
@@ -284,8 +332,12 @@ export class UnifiedDataService {
   }
 
   // LEADS
-  static async getLeads(filters?: Partial<LeadFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<Lead[]> {
-    const supabase = getSupabaseClient();
+  static async getLeads(
+    filters?: Partial<LeadFilters>,
+    organizationId: string = DEFAULT_ORGANIZATION.id,
+    authToken?: string
+  ): Promise<Lead[]> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         let query = supabase
@@ -301,9 +353,10 @@ export class UnifiedDataService {
         }
 
         const { data, error } = await query;
-        if (!error && data && data.length > 0) {
+        if (!error && Array.isArray(data)) {
           return data.map(this.mapSupabaseLeadToDomain);
         }
+        if (error) throw error;
       } catch (e) {
         console.error('[SupabaseAdapter] Leads query fallback to ServerStore', e);
       }
@@ -312,17 +365,20 @@ export class UnifiedDataService {
     return ServerStore.getLeads(filters, organizationId);
   }
 
-  static async getLeadById(id: string): Promise<Lead | null> {
-    const supabase = getSupabaseClient();
+  static async getLeadById(id: string, authToken?: string): Promise<Lead | null> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const { data, error } = await supabase
           .from('leads')
           .select('*, lead_activities(*)')
           .eq('id', id)
-          .single();
+          .maybeSingle();
         if (!error && data) {
           return this.mapSupabaseLeadToDomain(data);
+        }
+        if (!error && !data) {
+          return null;
         }
       } catch (e) {
         // Fallback
@@ -331,15 +387,38 @@ export class UnifiedDataService {
     return ServerStore.getLeadById(id);
   }
 
-  static async findDuplicateLead(email: string, phone: string, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<Lead | null> {
+  static async findDuplicateLead(
+    email: string,
+    phone: string,
+    organizationId: string = DEFAULT_ORGANIZATION.id,
+    authToken?: string
+  ): Promise<Lead | null> {
+    const supabase = getSupabaseClient(authToken);
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('leads')
+          .select('*, lead_activities(*)')
+          .eq('organization_id', organizationId)
+          .or(`email.eq.${email},phone.eq.${phone}`)
+          .limit(1)
+          .maybeSingle();
+        if (!error && data) {
+          return this.mapSupabaseLeadToDomain(data);
+        }
+      } catch (e) {
+        // Fallback
+      }
+    }
     return ServerStore.findDuplicateLead(email, phone, organizationId);
   }
 
-  static async createLead(leadData: CreateLeadInput): Promise<Lead> {
-    const supabase = getSupabaseClient();
+  static async createLead(leadData: CreateLeadInput, authToken?: string): Promise<Lead> {
+    const supabase = getSupabaseClient(authToken);
+    const targetOrgId = leadData.organizationId || DEFAULT_ORGANIZATION.id;
     const payloadWithDefaults = {
       ...leadData,
-      organizationId: leadData.organizationId || DEFAULT_ORGANIZATION.id,
+      organizationId: targetOrgId,
       currency: leadData.currency || 'COP',
     };
     if (supabase) {
@@ -351,7 +430,15 @@ export class UnifiedDataService {
           .select()
           .single();
         if (!error && data) {
-          return this.mapSupabaseLeadToDomain(data);
+          if (leadData.notes) {
+            await supabase.from('lead_activities').insert({
+              lead_id: data.id,
+              description: `Prospecto registrado: ${leadData.notes}`,
+              type: 'created',
+              author: leadData.assignedAgent || 'Sistema',
+            });
+          }
+          return this.mapSupabaseLeadToDomain({ ...data, lead_activities: [] });
         }
       } catch (e) {
         console.error('[SupabaseAdapter] Create lead error in Supabase, using ServerStore', e);
@@ -361,8 +448,8 @@ export class UnifiedDataService {
     return ServerStore.createLead(payloadWithDefaults);
   }
 
-  static async updateLead(id: string, updates: Partial<Lead>): Promise<Lead> {
-    const supabase = getSupabaseClient();
+  static async updateLead(id: string, updates: Partial<Lead>, authToken?: string): Promise<Lead> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const payload = this.mapDomainLeadToSupabase(updates);
@@ -370,7 +457,7 @@ export class UnifiedDataService {
           .from('leads')
           .update(payload)
           .eq('id', id)
-          .select()
+          .select('*, lead_activities(*)')
           .single();
         if (!error && data) {
           return this.mapSupabaseLeadToDomain(data);
@@ -383,8 +470,14 @@ export class UnifiedDataService {
     return ServerStore.updateLead(id, updates);
   }
 
-  static async addLeadActivity(leadId: string, description: string, type: any = 'note_added', author = 'Asesor'): Promise<Lead> {
-    const supabase = getSupabaseClient();
+  static async addLeadActivity(
+    leadId: string,
+    description: string,
+    type: any = 'note_added',
+    author = 'Asesor',
+    authToken?: string
+  ): Promise<Lead> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         await supabase.from('lead_activities').insert({
@@ -393,6 +486,8 @@ export class UnifiedDataService {
           type,
           author,
         });
+        const updated = await this.getLeadById(leadId, authToken);
+        if (updated) return updated;
       } catch (e) {
         // Fallback
       }
@@ -401,8 +496,8 @@ export class UnifiedDataService {
     return ServerStore.addLeadActivity(leadId, description, type, author);
   }
 
-  static async deleteLead(id: string): Promise<boolean> {
-    const supabase = getSupabaseClient();
+  static async deleteLead(id: string, authToken?: string): Promise<boolean> {
+    const supabase = getSupabaseClient(authToken);
     if (supabase) {
       try {
         const { error } = await supabase.from('leads').delete().eq('id', id);
@@ -414,8 +509,11 @@ export class UnifiedDataService {
     return ServerStore.deleteLead(id);
   }
 
-  static async getStats(organizationId: string = DEFAULT_ORGANIZATION.id): Promise<LeadStats> {
-    const leads = await this.getLeads({}, organizationId);
+  static async getStats(
+    organizationId: string = DEFAULT_ORGANIZATION.id,
+    authToken?: string
+  ): Promise<LeadStats> {
+    const leads = await this.getLeads({}, organizationId, authToken);
 
     const byStatus: Record<string, number> = {
       nuevo: 0,

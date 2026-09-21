@@ -81,14 +81,20 @@ export async function checkRateLimit(
  */
 export async function authenticateAdminRequest(req: NextRequest): Promise<AuthSession | null> {
   const authHeader = req.headers.get('authorization') || req.headers.get('x-admin-token');
+  const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
 
-  // 1. Check for API Secret / Service Key in server integrations
-  const adminSecret = process.env.ADMIN_API_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'ia-admin-secret-dev';
+  // 1. Check for API Secret in server integrations (strictly disallowed for simulated dev tokens in production)
+  const adminSecret = process.env.ADMIN_API_SECRET || (!isProduction ? 'ia-admin-secret-dev' : undefined);
 
-  if (authHeader) {
+  if (authHeader && adminSecret) {
     const cleanToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
-    // Check if matching admin secret or scoped admin token (e.g. "ia-admin-secret-dev:org_cardona_real_002:admin")
+    // In production, reject default dev secrets unconditionally
+    if (isProduction && cleanToken.startsWith('ia-admin-secret-dev')) {
+      return null;
+    }
+
+    // Check if matching admin secret or scoped admin token (e.g. "secret:org_cardona_real_002:admin")
     if (cleanToken.startsWith(adminSecret)) {
       const parts = cleanToken.split(':');
       const scopedOrg = parts.length > 1 && parts[1] ? parts[1] : DEFAULT_ORGANIZATION.id;

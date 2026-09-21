@@ -10,12 +10,19 @@ import {
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const lead = await UnifiedDataService.getLeadById(id);
+    const authHeader = req.headers.get('authorization') || undefined;
+    const lead = await UnifiedDataService.getLeadById(id, authHeader);
     if (!lead) {
       return NextResponse.json({ success: false, error: 'Prospecto no encontrado' }, { status: 404 });
     }
 
     const authSession = await authenticateAdminRequest(req);
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
+    if (!authSession && isProduction) {
+      return unauthorizedResponse('Acceso restringido: Se requiere autenticación para consultar prospectos.');
+    }
+
     if (!authSession) {
       return NextResponse.json({
         success: true,
@@ -39,6 +46,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const { id } = await params;
     const body = await req.json();
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para modificar prospectos.');
     }
@@ -53,16 +61,17 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         id,
         body.activity.description,
         body.activity.type || 'note_added',
-        body.activity.author || 'Asesor'
+        body.activity.author || 'Asesor',
+        authHeader
       );
     }
 
     const { activity, ...updates } = body;
     let updatedLead = null;
     if (Object.keys(updates).length > 0) {
-      updatedLead = await UnifiedDataService.updateLead(id, updates);
+      updatedLead = await UnifiedDataService.updateLead(id, updates, authHeader);
     } else {
-      updatedLead = await UnifiedDataService.getLeadById(id);
+      updatedLead = await UnifiedDataService.getLeadById(id, authHeader);
     }
 
     return NextResponse.json({ success: true, lead: updatedLead });
@@ -75,6 +84,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   try {
     const { id } = await params;
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para eliminar prospectos.');
     }
@@ -84,7 +94,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       return forbiddenResponse('Solo los roles owner y admin tienen permisos para eliminar prospectos.');
     }
 
-    const deleted = await UnifiedDataService.deleteLead(id);
+    const deleted = await UnifiedDataService.deleteLead(id, authHeader);
     return NextResponse.json({ success: deleted });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

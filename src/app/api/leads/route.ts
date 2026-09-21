@@ -32,10 +32,17 @@ export async function GET(req: NextRequest) {
     };
 
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
+    const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
+
+    if (!authSession && isProduction) {
+      return unauthorizedResponse('Acceso restringido: Se requiere autenticación para consultar prospectos comerciales.');
+    }
+
     const orgId = authSession?.organizationId || DEFAULT_ORGANIZATION.id;
 
-    const leads = await UnifiedDataService.getLeads(filters, orgId);
-    const stats = await UnifiedDataService.getStats(orgId);
+    const leads = await UnifiedDataService.getLeads(filters, orgId, authHeader);
+    const stats = await UnifiedDataService.getStats(orgId, authHeader);
 
     // If unauthenticated in public demo mode, mask contact information
     const sanitizedLeads = !authSession
@@ -61,6 +68,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const authSession = await authenticateAdminRequest(req);
+    const authHeader = req.headers.get('authorization') || undefined;
 
     // If authenticated: enforce RBAC role permissions
     if (authSession) {
@@ -100,13 +108,14 @@ export async function POST(req: NextRequest) {
 
     // Check duplicate
     if (body.email || body.phone) {
-      const existing = await UnifiedDataService.findDuplicateLead(body.email || '', body.phone || '', targetOrgId);
+      const existing = await UnifiedDataService.findDuplicateLead(body.email || '', body.phone || '', targetOrgId, authHeader);
       if (existing && !body.allowDuplicate) {
         const updated = await UnifiedDataService.addLeadActivity(
           existing.id,
           `Nueva interacción registrada desde captación web. Notas: ${body.notes || 'Consulta recurrente'}`,
           'contact_attempt',
-          'Sistema'
+          'Sistema',
+          authHeader
         );
         return NextResponse.json(
           {
@@ -125,7 +134,7 @@ export async function POST(req: NextRequest) {
       organizationId: targetOrgId,
       consentHabeasData: body.consentHabeasData !== false,
       source: body.source || (authSession ? 'manual' : 'web_form'),
-    });
+    }, authHeader);
 
     return NextResponse.json({ success: true, lead: newLead, demoMode: !authSession }, { status: 201 });
   } catch (error: any) {

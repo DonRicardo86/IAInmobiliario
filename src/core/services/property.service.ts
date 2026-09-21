@@ -1,5 +1,6 @@
 import { Property, PropertyFilters, PropertyPublicView, PropertyStatus } from '../types/property';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
+import { getAuthHeader } from '../auth/supabase-browser';
 
 export class PropertyService {
   async getProperties(filters?: Partial<PropertyFilters>, organizationId: string = DEFAULT_ORGANIZATION.id): Promise<Property[]> {
@@ -13,8 +14,14 @@ export class PropertyService {
       if (filters?.search) queryParams.set('search', filters.search);
       if (filters?.minPrice) queryParams.set('minPrice', String(filters.minPrice));
       if (filters?.maxPrice) queryParams.set('maxPrice', String(filters.maxPrice));
+      if (organizationId) queryParams.set('organizationId', organizationId);
 
-      const res = await fetch(`/api/properties?${queryParams.toString()}`);
+      const authHeaders = await getAuthHeader();
+      const res = await fetch(`/api/properties?${queryParams.toString()}`, {
+        headers: {
+          ...authHeaders,
+        },
+      });
       const data = await res.json();
       if (data.success) return data.properties;
       return [];
@@ -32,6 +39,7 @@ export class PropertyService {
       if (filters?.municipality && filters.municipality !== 'todos') queryParams.set('municipality', filters.municipality);
       if (filters?.zone && filters.zone !== 'todas') queryParams.set('zone', filters.zone);
       if (filters?.search) queryParams.set('search', filters.search);
+      if (organizationId) queryParams.set('organizationId', organizationId);
 
       const res = await fetch(`/api/properties?${queryParams.toString()}`);
       const data = await res.json();
@@ -45,7 +53,12 @@ export class PropertyService {
 
   async getPropertyById(id: string): Promise<Property | null> {
     try {
-      const res = await fetch(`/api/properties/${id}`);
+      const authHeaders = await getAuthHeader();
+      const res = await fetch(`/api/properties/${id}`, {
+        headers: {
+          ...authHeaders,
+        },
+      });
       const data = await res.json();
       if (data.success) return data.property;
       return null;
@@ -58,7 +71,6 @@ export class PropertyService {
   async createProperty(
     data: Omit<Property, 'id' | 'createdAt' | 'updatedAt' | 'organizationId'> & { organizationId?: string }
   ): Promise<Property> {
-    // Basic validation
     if (!data.title?.trim()) throw new Error('El título del inmueble es obligatorio.');
     if (!data.code?.trim()) throw new Error('El código de referencia es obligatorio.');
     if (!data.municipality?.trim()) throw new Error('El municipio es obligatorio.');
@@ -81,9 +93,13 @@ export class PropertyService {
       assignedAgent: data.assignedAgent || 'Laura Gómez',
     };
 
+    const authHeaders = await getAuthHeader();
     const res = await fetch('/api/properties', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
       body: JSON.stringify(payload),
     });
     const resData = await res.json();
@@ -92,9 +108,13 @@ export class PropertyService {
   }
 
   async updateProperty(id: string, updates: Partial<Property>): Promise<Property> {
+    const authHeaders = await getAuthHeader();
     const res = await fetch(`/api/properties/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
       body: JSON.stringify(updates),
     });
     const resData = await res.json();
@@ -107,8 +127,12 @@ export class PropertyService {
   }
 
   async deleteProperty(id: string): Promise<boolean> {
+    const authHeaders = await getAuthHeader();
     const res = await fetch(`/api/properties/${id}`, {
       method: 'DELETE',
+      headers: {
+        ...authHeaders,
+      },
     });
     const resData = await res.json();
     return !!resData.success;
@@ -147,8 +171,61 @@ export class PropertyService {
     };
   }
 
+  async matchForAssistant(
+    criteria: {
+      operation?: 'compra' | 'arriendo';
+      propertyType?: string;
+      municipality?: string;
+      zone?: string;
+      maxBudget?: number;
+      minBedrooms?: number;
+    },
+    organizationId: string = DEFAULT_ORGANIZATION.id
+  ): Promise<PropertyPublicView[]> {
+    const catalog = await this.getPublicCatalog({}, organizationId);
+
+    return catalog.filter((p) => {
+      if (criteria.operation && p.operation !== criteria.operation) return false;
+
+      if (criteria.propertyType && criteria.propertyType !== 'todos') {
+        if (!p.type.toLowerCase().includes(criteria.propertyType.toLowerCase()) &&
+            !criteria.propertyType.toLowerCase().includes(p.type.toLowerCase())) {
+          return false;
+        }
+      }
+
+      if (criteria.municipality && criteria.municipality.trim() !== '') {
+        const munMatch = p.municipality.toLowerCase().includes(criteria.municipality.toLowerCase());
+        const zoneMatch = p.zone.toLowerCase().includes(criteria.municipality.toLowerCase());
+        if (!munMatch && !zoneMatch) return false;
+      }
+
+      if (criteria.zone && criteria.zone.trim() !== '') {
+        const zoneMatch = p.zone.toLowerCase().includes(criteria.zone.toLowerCase());
+        if (!zoneMatch) return false;
+      }
+
+      if (criteria.maxBudget && criteria.maxBudget > 0) {
+        const budgetLimit = criteria.maxBudget * 1.15;
+        if (p.priceCOP > budgetLimit) return false;
+      }
+
+      if (criteria.minBedrooms && criteria.minBedrooms > 0) {
+        if (p.bedrooms < criteria.minBedrooms) return false;
+      }
+
+      return true;
+    }).slice(0, 3);
+  }
+
   async resetData(): Promise<void> {
-    await fetch('/api/demo/reset', { method: 'POST' });
+    const authHeaders = await getAuthHeader();
+    await fetch('/api/demo/reset', {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+      },
+    });
   }
 }
 
