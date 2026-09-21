@@ -25,7 +25,9 @@ export async function checkRateLimit(
   maxRequests = 15,
   windowSeconds = 60
 ): Promise<boolean> {
+  const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
   const supabase = getSupabaseClient();
+
   if (supabase) {
     try {
       const { data, error } = await supabase.rpc('check_distributed_rate_limit', {
@@ -37,12 +39,24 @@ export async function checkRateLimit(
       if (!error && typeof data === 'boolean') {
         return data;
       }
+      if (error) {
+        console.error('[RateLimit] Error calling check_distributed_rate_limit:', error);
+        if (isProduction) {
+          return false; // Fail closed in production if shared rate limiter fails
+        }
+      }
     } catch (e) {
-      // Fallback to local memory on connection issue
+      console.error('[RateLimit] Exception in check_distributed_rate_limit:', e);
+      if (isProduction) {
+        return false; // Fail closed in production
+      }
     }
+  } else if (isProduction) {
+    // In production, reject if shared rate limiter is unconfigured
+    return false;
   }
 
-  // Local fallback
+  // Development and local testing fallback
   const now = Date.now();
   const key = `${identifier}:${endpoint}`;
   const record = inMemoryRateLimitMap.get(key);

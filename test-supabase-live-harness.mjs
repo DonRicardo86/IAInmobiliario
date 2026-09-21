@@ -67,10 +67,10 @@ async function runLiveHarness() {
     assert(hasPublicOrgView, 'Vista sanitizada public.public_organizations configurada con security_barrier');
 
     // 1.5 Verificación de Revocación Anónima en Tablas Base
-    const hasRevokeProperties = schemaSql.includes('REVOKE ALL ON public.properties FROM anon');
-    const hasRevokeOrganizations = schemaSql.includes('REVOKE ALL ON public.organizations FROM anon');
-    const hasRevokeLeads = schemaSql.includes('REVOKE ALL ON public.leads FROM anon');
-    assert(hasRevokeProperties && hasRevokeOrganizations && hasRevokeLeads, 'Permisos directos a anon revocados en tablas base');
+    const hasRevokeAllTables = schemaSql.includes('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon') ||
+                               schemaSql.includes('REVOKE ALL ON public.properties FROM anon');
+    const hasRevokeRoutines = schemaSql.includes('REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM PUBLIC, anon');
+    assert(hasRevokeAllTables && hasRevokeRoutines, 'Permisos directos a anon y PUBLIC revocados en tablas base y rutinas');
 
     // 1.6 Verificación de Rate Limiter Distribuido
     const hasDistributedRateLimit = schemaSql.includes('check_distributed_rate_limit') &&

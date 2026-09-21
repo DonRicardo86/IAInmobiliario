@@ -562,22 +562,18 @@ USING (true);
 
 -- ==============================================================================
 -- 12. PERMISOS DE ACCESO PARA ROLES DE SUPABASE (anon / authenticated)
--- Principio de mínimo privilegio estricto: 'anon' nunca accede a tablas base.
+-- Principio de mínimo privilegio estricto: 'anon' nunca accede a tablas base ni funciones privadas.
 -- ==============================================================================
-REVOKE ALL ON public.organizations FROM anon;
-REVOKE ALL ON public.properties FROM anon;
-REVOKE ALL ON public.property_private_details FROM anon;
-REVOKE ALL ON public.leads FROM anon;
-REVOKE ALL ON public.lead_activities FROM anon;
-REVOKE ALL ON public.organization_members FROM anon;
-REVOKE ALL ON public.api_rate_limits FROM anon;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon;
+REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM PUBLIC, anon;
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, service_role;
 
--- Permisos públicos autorizados para 'anon' exclusivamente sobre vistas sanitizadas
+-- Permisos públicos autorizados para 'anon' EXCLUSIVAMENTE sobre vistas sanitizadas
 GRANT SELECT ON public.public_properties TO anon;
 GRANT SELECT ON public.public_organizations TO anon;
 
@@ -591,9 +587,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.lead_activities TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.organization_members TO authenticated;
 
--- Permisos de ejecución de funciones
-GRANT EXECUTE ON FUNCTION public.is_org_member(UUID) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated;
-GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO anon, authenticated;
+-- Permisos de ejecución de funciones restringidos a roles autenticados y backend de servicio
+GRANT EXECUTE ON FUNCTION public.is_org_member(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO authenticated, service_role;
+
