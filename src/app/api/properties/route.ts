@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
-import { authenticateAdminRequest, unauthorizedResponse } from '@/core/auth/auth-guard';
+import {
+  authenticateAdminRequest,
+  unauthorizedResponse,
+  forbiddenResponse,
+  hasRequiredRole,
+} from '@/core/auth/auth-guard';
+import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
 
 export async function GET(req: NextRequest) {
   try {
@@ -28,16 +34,21 @@ export async function GET(req: NextRequest) {
 
     const targetOrgId = searchParams.get('organizationId') || undefined;
 
+    // Public catalog view: only non-sensitive fields from public_properties
     if (view === 'public') {
       const publicProperties = await UnifiedDataService.getPublicProperties(filters, targetOrgId);
-      return NextResponse.json({ success: true, properties: publicProperties, organizationId: targetOrgId || 'org_inmo_premier_001' });
+      return NextResponse.json({
+        success: true,
+        properties: publicProperties,
+        organizationId: targetOrgId || DEFAULT_ORGANIZATION.id,
+      });
     }
 
-    // Admin view: Check if authenticated or in public demo tour
+    // Admin view: requires authentication
     const authSession = await authenticateAdminRequest(req);
     const properties = await UnifiedDataService.getProperties(filters, authSession?.organizationId);
 
-    // If anonymous in public demo, sanitize private internal addresses
+    // If unauthenticated in demo mode, strictly sanitize private internal addresses
     if (!authSession) {
       const sanitizedForDemo = properties.map((p) => ({
         ...p,
@@ -56,6 +67,17 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
+    // Authenticate admin request
+    const authSession = await authenticateAdminRequest(req);
+    if (!authSession) {
+      return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para registrar propiedades en el inventario.');
+    }
+
+    // Check RBAC permission: viewer cannot insert
+    if (!hasRequiredRole(authSession, ['owner', 'admin', 'agent'])) {
+      return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para crear inmuebles.');
+    }
+
     // Input validation & sanitization
     if (!body.title?.trim()) {
       return NextResponse.json({ success: false, error: 'El título del inmueble es obligatorio' }, { status: 400 });
@@ -65,12 +87,6 @@ export async function POST(req: NextRequest) {
     }
     if (!body.priceCOP || Number(body.priceCOP) <= 0) {
       return NextResponse.json({ success: false, error: 'El precio debe ser mayor a cero' }, { status: 400 });
-    }
-
-    // Authenticate admin request
-    const authSession = await authenticateAdminRequest(req);
-    if (!authSession) {
-      return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para registrar propiedades en el inventario.');
     }
 
     const created = await UnifiedDataService.createProperty({

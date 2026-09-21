@@ -481,6 +481,10 @@ export class UnifiedDataService {
 
   // MAPPERS
   private static mapSupabasePropertyToDomain(row: any): Property {
+    const privateDetails = Array.isArray(row.property_private_details)
+      ? row.property_private_details[0]
+      : row.property_private_details;
+
     return {
       id: row.id,
       organizationId: row.organization_id,
@@ -491,7 +495,7 @@ export class UnifiedDataService {
       operation: row.operation,
       municipality: row.municipality,
       zone: row.zone,
-      internalAddress: row.internal_address,
+      internalAddress: privateDetails?.internal_address || row.internal_address || 'Dirección no registrada',
       priceCOP: Number(row.price_cop),
       adminFeeCOP: Number(row.admin_fee_cop || 0),
       areaM2: Number(row.area_m2),
@@ -502,7 +506,7 @@ export class UnifiedDataService {
       features: row.features || [],
       images: row.images || [],
       status: row.status,
-      assignedAgent: row.assigned_agent,
+      assignedAgent: privateDetails?.assigned_agent || row.assigned_agent || 'Sin Asignar',
       featured: row.featured,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
-import { authenticateAdminRequest, unauthorizedResponse } from '@/core/auth/auth-guard';
+import {
+  authenticateAdminRequest,
+  unauthorizedResponse,
+  forbiddenResponse,
+  hasRequiredRole,
+} from '@/core/auth/auth-guard';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -38,6 +43,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para modificar prospectos.');
     }
 
+    // RBAC: viewer cannot update leads
+    if (!hasRequiredRole(authSession, ['owner', 'admin', 'agent'])) {
+      return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para modificar prospectos.');
+    }
+
     if (body.activity) {
       await UnifiedDataService.addLeadActivity(
         id,
@@ -67,6 +77,11 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const authSession = await authenticateAdminRequest(req);
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para eliminar prospectos.');
+    }
+
+    // RBAC: only owner and admin can delete leads
+    if (!hasRequiredRole(authSession, ['owner', 'admin'])) {
+      return forbiddenResponse('Solo los roles owner y admin tienen permisos para eliminar prospectos.');
     }
 
     const deleted = await UnifiedDataService.deleteLead(id);

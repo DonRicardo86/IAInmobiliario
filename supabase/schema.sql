@@ -1,9 +1,9 @@
 -- ==============================================================================
 -- IA_INMOBILIARIA: ESQUEMA POSTGRESQL Y ROW LEVEL SECURITY (RLS) PARA SUPABASE
--- Arquitectura SaaS Multi-Tenant para Inmobiliarias Colombianas
+-- Arquitectura SaaS Multi-Tenant y Seguridad Estricta Basada en Roles (RBAC)
 -- ==============================================================================
 
--- 0. EXTENSIONES
+-- 0. EXTENSIONES DE SEGURIDAD
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS public.organizations (
 );
 
 -- ==============================================================================
--- 2. TABLA: MIEMBROS DE ORGANIZACIÓN (Vínculo con Supabase Auth)
+-- 2. TABLA: MIEMBROS DE ORGANIZACIÓN (Vínculo con Supabase Auth y Roles)
+-- Roles disponibles:
+--   - 'owner': Control total de la inmobiliaria, gestión de miembros y facturación.
+--   - 'admin': Gestión completa de inventario, prospectos y consulta de miembros.
+--   - 'agent': Gestión operativa de inventario y prospectos (sin eliminación).
+--   - 'viewer': Solo lectura sobre inventario y prospectos de su organización.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.organization_members (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -40,7 +45,9 @@ CREATE TABLE IF NOT EXISTS public.organization_members (
 );
 
 -- ==============================================================================
--- 3. TABLA: PROPIEDADES / INVENTARIO
+-- 3. TABLA: PROPIEDADES (Inventario General)
+-- Nota: Solo accesible a miembros autenticados de la organización.
+-- Visitantes anónimos acceden exclusivamente a la vista 'public_properties'.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.properties (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -52,7 +59,6 @@ CREATE TABLE IF NOT EXISTS public.properties (
     operation VARCHAR(50) NOT NULL CHECK (operation IN ('compra', 'arriendo')),
     municipality VARCHAR(100) NOT NULL,
     zone VARCHAR(100) NOT NULL,
-    internal_address TEXT NOT NULL, -- Dirección privada interna (Solo CRM administrativo)
     price_cop NUMERIC(15, 2) NOT NULL CHECK (price_cop >= 0),
     admin_fee_cop NUMERIC(15, 2) DEFAULT 0 CHECK (admin_fee_cop >= 0),
     area_m2 NUMERIC(10, 2) NOT NULL CHECK (area_m2 >= 0),
@@ -63,7 +69,6 @@ CREATE TABLE IF NOT EXISTS public.properties (
     features TEXT[] DEFAULT '{}',
     images TEXT[] DEFAULT '{}',
     status VARCHAR(50) NOT NULL DEFAULT 'disponible' CHECK (status IN ('disponible', 'reservado', 'vendido', 'arrendado')),
-    assigned_agent VARCHAR(150) DEFAULT 'Sin Asignar',
     featured BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -71,7 +76,26 @@ CREATE TABLE IF NOT EXISTS public.properties (
 );
 
 -- ==============================================================================
--- 4. TABLA: PROSPECTOS / LEADS (CRM Comercial)
+-- 4. TABLA: DETALLES PRIVADOS DE PROPIEDADES (Datos Sensibles de Propietarios y CRM)
+-- Separación física estricta para garantizar que la información confidencial nunca se exponga.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.property_private_details (
+    property_id UUID PRIMARY KEY REFERENCES public.properties(id) ON DELETE CASCADE,
+    organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    internal_address TEXT NOT NULL,
+    owner_name VARCHAR(255),
+    owner_phone VARCHAR(50),
+    owner_email VARCHAR(255),
+    commission_rate NUMERIC(5,2) DEFAULT 3.00,
+    private_notes TEXT,
+    assigned_agent VARCHAR(150) DEFAULT 'Sin Asignar',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ==============================================================================
+-- 5. TABLA: PROSPECTOS / LEADS (CRM Comercial Privado)
+-- Solo accesible a miembros autenticados. La captación pública se procesa mediante el servidor.
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.leads (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -100,7 +124,7 @@ CREATE TABLE IF NOT EXISTS public.leads (
 );
 
 -- ==============================================================================
--- 5. TABLA: ACTIVIDADES Y SEGUIMIENTO DE PROSPECTOS
+-- 6. TABLA: ACTIVIDADES Y SEGUIMIENTO DE PROSPECTOS
 -- ==============================================================================
 CREATE TABLE IF NOT EXISTS public.lead_activities (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -112,11 +136,12 @@ CREATE TABLE IF NOT EXISTS public.lead_activities (
 );
 
 -- ==============================================================================
--- 6. ÍNDICES DE ALTO RENDIMIENTO
+-- 7. ÍNDICES DE ALTO RENDIMIENTO
 -- ==============================================================================
 CREATE INDEX IF NOT EXISTS idx_properties_org ON public.properties(organization_id);
 CREATE INDEX IF NOT EXISTS idx_properties_status ON public.properties(status);
 CREATE INDEX IF NOT EXISTS idx_properties_search ON public.properties(organization_id, operation, type, status, municipality, price_cop);
+CREATE INDEX IF NOT EXISTS idx_prop_private_org ON public.property_private_details(organization_id);
 CREATE INDEX IF NOT EXISTS idx_leads_org ON public.leads(organization_id);
 CREATE INDEX IF NOT EXISTS idx_leads_status_priority ON public.leads(organization_id, status, priority);
 CREATE INDEX IF NOT EXISTS idx_leads_contact_search ON public.leads(organization_id, email, phone);
@@ -125,9 +150,10 @@ CREATE INDEX IF NOT EXISTS idx_org_members_user ON public.organization_members(u
 CREATE INDEX IF NOT EXISTS idx_org_members_org ON public.organization_members(organization_id);
 
 -- ==============================================================================
--- 7. VISTA PÚBLICA SANITIZADA (Excluye direcciones privadas y datos de propietarios)
+-- 8. VISTA PÚBLICA SANITIZADA (Solo datos comerciales autorizados)
+-- Con security_barrier para evitar ataques de canal lateral o filtración de planes de ejecución.
 -- ==============================================================================
-CREATE OR REPLACE VIEW public.public_properties AS
+CREATE OR REPLACE VIEW public.public_properties WITH (security_barrier = true) AS
 SELECT
     id,
     organization_id,
@@ -154,43 +180,77 @@ FROM public.properties
 WHERE status = 'disponible';
 
 -- ==============================================================================
--- 8. FUNCIONES AUXILIARES DE AUTENTICACIÓN Y SEGURIDAD
+-- 9. FUNCIONES DE AUTORIZACIÓN Y SEGURIDAD MULTI-TENANT (RBAC)
+-- Todas las funciones usan search_path seguro para prevenir inyección de esquemas.
 -- ==============================================================================
 
--- Función segura para extraer la organización del usuario autenticado
-CREATE OR REPLACE FUNCTION public.get_user_organization_id()
-RETURNS UUID AS $$
-DECLARE
-    jwt_org UUID;
-    member_org UUID;
+-- Verifica si el usuario autenticado pertenece a una organización específica
+CREATE OR REPLACE FUNCTION public.is_org_member(target_org_id UUID)
+RETURNS BOOLEAN AS $$
 BEGIN
-    -- 1. Intentar obtener desde claims JWT (app_metadata / user_metadata)
-    BEGIN
-        jwt_org := NULLIF(current_setting('request.jwt.claims', true)::json->'app_metadata'->>'organization_id', '')::UUID;
-        IF jwt_org IS NOT NULL THEN
-            RETURN jwt_org;
-        END IF;
-    EXCEPTION WHEN OTHERS THEN
-        jwt_org := NULL;
-    END;
+    IF auth.uid() IS NULL THEN
+        RETURN FALSE;
+    END IF;
 
-    -- 2. Fallback seguro: consultar la tabla de miembros
-    SELECT organization_id INTO member_org
+    RETURN EXISTS (
+        SELECT 1 FROM public.organization_members
+        WHERE organization_members.organization_id = target_org_id
+          AND organization_members.user_id = auth.uid()
+    );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- Verifica si el usuario autenticado tiene uno de los roles autorizados en la organización
+CREATE OR REPLACE FUNCTION public.has_org_role(target_org_id UUID, allowed_roles VARCHAR[])
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    RETURN EXISTS (
+        SELECT 1 FROM public.organization_members
+        WHERE organization_members.organization_id = target_org_id
+          AND organization_members.user_id = auth.uid()
+          AND organization_members.role = ANY(allowed_roles)
+    );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- Obtiene el rol del usuario autenticado en una organización
+CREATE OR REPLACE FUNCTION public.get_user_role(target_org_id UUID)
+RETURNS VARCHAR AS $$
+DECLARE
+    user_role VARCHAR;
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT role INTO user_role
     FROM public.organization_members
-    WHERE user_id = auth.uid()
+    WHERE organization_members.organization_id = target_org_id
+      AND organization_members.user_id = auth.uid()
     LIMIT 1;
 
-    RETURN member_org;
+    RETURN user_role;
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
--- Alias en auth schema para compatibilidad
-CREATE OR REPLACE FUNCTION auth.get_user_organization_id()
-RETURNS UUID AS $$
+-- Retorna el conjunto de IDs de organizaciones a las que pertenece el usuario
+CREATE OR REPLACE FUNCTION public.get_user_organization_ids()
+RETURNS SETOF UUID AS $$
 BEGIN
-    RETURN public.get_user_organization_id();
+    IF auth.uid() IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT organization_members.organization_id
+    FROM public.organization_members
+    WHERE organization_members.user_id = auth.uid();
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- Trigger para actualizar updated_at automáticamente
 CREATE OR REPLACE FUNCTION public.handle_updated_at()
@@ -199,11 +259,16 @@ BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = public, pg_temp;
 
 DROP TRIGGER IF EXISTS tr_properties_updated_at ON public.properties;
 CREATE TRIGGER tr_properties_updated_at
 BEFORE UPDATE ON public.properties
+FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+DROP TRIGGER IF EXISTS tr_prop_private_updated_at ON public.property_private_details;
+CREATE TRIGGER tr_prop_private_updated_at
+BEFORE UPDATE ON public.property_private_details
 FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 DROP TRIGGER IF EXISTS tr_leads_updated_at ON public.leads;
@@ -212,88 +277,132 @@ BEFORE UPDATE ON public.leads
 FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 -- ==============================================================================
--- 9. POLÍTICAS DE ROW LEVEL SECURITY (RLS)
+-- 10. POLÍTICAS DE ROW LEVEL SECURITY (RLS) GRANULARES POR ROL
 -- ==============================================================================
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.properties ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.property_private_details ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.lead_activities ENABLE ROW LEVEL SECURITY;
 
--- 9.1 ORGANIZACIONES
+-- 10.1 ORGANIZACIONES
 DROP POLICY IF EXISTS "Public can view organization public profile" ON public.organizations;
 CREATE POLICY "Public can view organization public profile"
 ON public.organizations FOR SELECT
 USING (true);
 
-DROP POLICY IF EXISTS "Org members can update their organization" ON public.organizations;
-CREATE POLICY "Org members can update their organization"
+DROP POLICY IF EXISTS "Org owner can update organization" ON public.organizations;
+CREATE POLICY "Org owner can update organization"
 ON public.organizations FOR UPDATE
 TO authenticated
-USING (id = auth.get_user_organization_id());
+USING (public.has_org_role(id, ARRAY['owner']));
 
--- 9.2 MIEMBROS DE ORGANIZACIÓN
+-- 10.2 MIEMBROS DE ORGANIZACIÓN
 DROP POLICY IF EXISTS "Org members can view member list" ON public.organization_members;
 CREATE POLICY "Org members can view member list"
 ON public.organization_members FOR SELECT
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.is_org_member(organization_id));
 
--- 9.3 PROPIEDADES (INVENTARIO)
-DROP POLICY IF EXISTS "Public can view available properties" ON public.properties;
-CREATE POLICY "Public can view available properties"
-ON public.properties FOR SELECT
-USING (status = 'disponible');
+DROP POLICY IF EXISTS "Org owner or admin can add members" ON public.organization_members;
+CREATE POLICY "Org owner or admin can add members"
+ON public.organization_members FOR INSERT
+TO authenticated
+WITH CHECK (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
-DROP POLICY IF EXISTS "Org members can view all their properties" ON public.properties;
-CREATE POLICY "Org members can view all their properties"
+DROP POLICY IF EXISTS "Org owner can update member roles" ON public.organization_members;
+CREATE POLICY "Org owner can update member roles"
+ON public.organization_members FOR UPDATE
+TO authenticated
+USING (public.has_org_role(organization_id, ARRAY['owner']));
+
+DROP POLICY IF EXISTS "Org owner can remove members" ON public.organization_members;
+CREATE POLICY "Org owner can remove members"
+ON public.organization_members FOR DELETE
+TO authenticated
+USING (public.has_org_role(organization_id, ARRAY['owner']));
+
+-- 10.3 PROPIEDADES (INVENTARIO GENERAL)
+-- NOTA CRÍTICA: No existe política SELECT para 'anon' en la tabla base.
+-- Los visitantes anónimos solo leen de public.public_properties.
+DROP POLICY IF EXISTS "Org members can view their properties" ON public.properties;
+CREATE POLICY "Org members can view their properties"
 ON public.properties FOR SELECT
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.is_org_member(organization_id));
 
-DROP POLICY IF EXISTS "Org members can insert properties" ON public.properties;
-CREATE POLICY "Org members can insert properties"
+DROP POLICY IF EXISTS "Authorized members can insert properties" ON public.properties;
+CREATE POLICY "Authorized members can insert properties"
 ON public.properties FOR INSERT
 TO authenticated
-WITH CHECK (organization_id = auth.get_user_organization_id());
+WITH CHECK (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
 
-DROP POLICY IF EXISTS "Org members can update their properties" ON public.properties;
-CREATE POLICY "Org members can update their properties"
+DROP POLICY IF EXISTS "Authorized members can update properties" ON public.properties;
+CREATE POLICY "Authorized members can update properties"
 ON public.properties FOR UPDATE
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
 
-DROP POLICY IF EXISTS "Org members can delete their properties" ON public.properties;
-CREATE POLICY "Org members can delete their properties"
+DROP POLICY IF EXISTS "Only owner and admin can delete properties" ON public.properties;
+CREATE POLICY "Only owner and admin can delete properties"
 ON public.properties FOR DELETE
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
--- 9.4 PROSPECTOS (LEADS)
-DROP POLICY IF EXISTS "Public can insert lead with habeas data consent" ON public.leads;
-CREATE POLICY "Public can insert lead with habeas data consent"
-ON public.leads FOR INSERT
-WITH CHECK (consent_habeas_data = true);
+-- 10.4 DETALLES PRIVADOS DE PROPIEDADES
+DROP POLICY IF EXISTS "Authorized members can view private details" ON public.property_private_details;
+CREATE POLICY "Authorized members can view private details"
+ON public.property_private_details FOR SELECT
+TO authenticated
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
 
+DROP POLICY IF EXISTS "Authorized members can insert private details" ON public.property_private_details;
+CREATE POLICY "Authorized members can insert private details"
+ON public.property_private_details FOR INSERT
+TO authenticated
+WITH CHECK (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
+
+DROP POLICY IF EXISTS "Authorized members can update private details" ON public.property_private_details;
+CREATE POLICY "Authorized members can update private details"
+ON public.property_private_details FOR UPDATE
+TO authenticated
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
+
+DROP POLICY IF EXISTS "Only owner and admin can delete private details" ON public.property_private_details;
+CREATE POLICY "Only owner and admin can delete private details"
+ON public.property_private_details FOR DELETE
+TO authenticated
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
+
+-- 10.5 PROSPECTOS (LEADS)
+-- NOTA CRÍTICA: Se revoca inserción y consulta anónima directa.
+-- La captación pública se procesa a través del endpoint seguro del servidor.
 DROP POLICY IF EXISTS "Org members can view their leads" ON public.leads;
 CREATE POLICY "Org members can view their leads"
 ON public.leads FOR SELECT
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.is_org_member(organization_id));
 
-DROP POLICY IF EXISTS "Org members can update their leads" ON public.leads;
-CREATE POLICY "Org members can update their leads"
+DROP POLICY IF EXISTS "Authorized members can insert leads" ON public.leads;
+CREATE POLICY "Authorized members can insert leads"
+ON public.leads FOR INSERT
+TO authenticated
+WITH CHECK (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
+
+DROP POLICY IF EXISTS "Authorized members can update leads" ON public.leads;
+CREATE POLICY "Authorized members can update leads"
 ON public.leads FOR UPDATE
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin', 'agent']));
 
-DROP POLICY IF EXISTS "Org members can delete their leads" ON public.leads;
-CREATE POLICY "Org members can delete their leads"
+DROP POLICY IF EXISTS "Only owner and admin can delete leads" ON public.leads;
+CREATE POLICY "Only owner and admin can delete leads"
 ON public.leads FOR DELETE
 TO authenticated
-USING (organization_id = auth.get_user_organization_id());
+USING (public.has_org_role(organization_id, ARRAY['owner', 'admin']));
 
--- 9.5 ACTIVIDADES DE PROSPECTOS
+-- 10.6 ACTIVIDADES DE PROSPECTOS
 DROP POLICY IF EXISTS "Org members can view lead activities" ON public.lead_activities;
 CREATE POLICY "Org members can view lead activities"
 ON public.lead_activities FOR SELECT
@@ -301,126 +410,49 @@ TO authenticated
 USING (EXISTS (
     SELECT 1 FROM public.leads
     WHERE leads.id = lead_activities.lead_id
-    AND leads.organization_id = auth.get_user_organization_id()
+    AND public.is_org_member(leads.organization_id)
 ));
 
-DROP POLICY IF EXISTS "Org members can insert lead activities" ON public.lead_activities;
-CREATE POLICY "Org members can insert lead activities"
+DROP POLICY IF EXISTS "Authorized members can insert lead activities" ON public.lead_activities;
+CREATE POLICY "Authorized members can insert lead activities"
 ON public.lead_activities FOR INSERT
 TO authenticated
 WITH CHECK (EXISTS (
     SELECT 1 FROM public.leads
     WHERE leads.id = lead_activities.lead_id
-    AND leads.organization_id = auth.get_user_organization_id()
+    AND public.has_org_role(leads.organization_id, ARRAY['owner', 'admin', 'agent'])
 ));
-
-DROP POLICY IF EXISTS "Public can insert initial lead activity" ON public.lead_activities;
-CREATE POLICY "Public can insert initial lead activity"
-ON public.lead_activities FOR INSERT
-WITH CHECK (true);
-
--- ==============================================================================
--- 10. DATOS SEMILLA INICIALES (Organización de Demostración Aislada)
--- ==============================================================================
-INSERT INTO public.organizations (
-    id,
-    name,
-    slug,
-    nit,
-    phone,
-    email,
-    city,
-    address,
-    currency,
-    ai_assistant_name,
-    ai_assistant_welcome_message
-) VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    'Inmobiliaria Premier (Demostración)',
-    'inmo-premier-demo',
-    '901.458.789-2',
-    '+57 304 360 5155',
-    'agenteinmobiliaria1986@gmail.com',
-    'Medellín',
-    'Cra 43A # 1-50, San Fernando Plaza, El Poblado',
-    'COP',
-    'SofIA Inmobiliaria',
-    '¡Hola! Soy SofIA, tu asesora inmobiliaria virtual de Inmobiliaria Premier. ¿Estás buscando comprar o arrendar una propiedad?'
-) ON CONFLICT (slug) DO UPDATE SET
-    phone = EXCLUDED.phone,
-    email = EXCLUDED.email;
-
--- Propiedades de muestra para la organización de prueba
-INSERT INTO public.properties (
-    id, organization_id, code, title, description, type, operation, municipality, zone,
-    internal_address, price_cop, admin_fee_cop, area_m2, bedrooms, bathrooms, parking_spots, stratum, features, images, status, assigned_agent, featured
-) VALUES
-(
-    '00000000-0000-0000-0000-000000000101',
-    '00000000-0000-0000-0000-000000000001',
-    'APT-101',
-    'Apartamento de Lujo en El Poblado con Vista Panorámica',
-    'Exclusivo apartamento en sector exclusivo de El Poblado. Acabados importados, ventanales de piso a techo, cocina italiana abierta y amplia terraza con vista a la ciudad.',
-    'apartamento', 'compra', 'Medellín', 'El Poblado',
-    'Cra 32 # 2 Sur-45 Torre 2 Apto 1802 (Propietario: Fernando Osorio)',
-    980000000, 650000, 142, 3, 3, 2, 6,
-    ARRAY['Balcón Panorámico', 'Piscina Climatizada', 'Gimnasio', '2 Parqueaderos'],
-    ARRAY['https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=1200&q=80'],
-    'disponible', 'Laura Gómez', true
-),
-(
-    '00000000-0000-0000-0000-000000000102',
-    '00000000-0000-0000-0000-000000000001',
-    'APT-901',
-    'Apartamento 2 Alcobas Moderno en Laureles Nogal',
-    'Moderno apartamento remodelado en el corazón de Laureles. Excelente iluminación natural, balcón amplio y acabados de primera.',
-    'apartamento', 'arriendo', 'Medellín', 'Laureles',
-    'Circular 4 # 72-18 Apto 401 (Propietaria: Beatriz Elena Jaramillo)',
-    2500000, 220000, 68, 2, 2, 1, 5,
-    ARRAY['Balcón', 'Ascensor', 'Parqueadero Privado', 'Cocina Integral'],
-    ARRAY['https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?auto=format&fit=crop&w=1200&q=80'],
-    'disponible', 'Laura Gómez', true
-),
-(
-    '00000000-0000-0000-0000-000000000103',
-    '00000000-0000-0000-0000-000000000001',
-    'APT-802',
-    'Apartamento de 2 Habitaciones en Belén La Palma',
-    'Acogedor apartamento cerca al metroplus y centros comerciales. Unidad cerrada con portería 24/7 y zonas verdes.',
-    'apartamento', 'arriendo', 'Medellín', 'Belén',
-    'Calle 30 # 78-45 Apto 502 (Propietario: Roberto Silva)',
-    2350000, 180000, 64, 2, 2, 1, 4,
-    ARRAY['Portería 24h', 'Piscina', 'Salón Social', 'Parqueadero'],
-    ARRAY['https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?auto=format&fit=crop&w=1200&q=80'],
-    'disponible', 'Laura Gómez', false
-),
-(
-    '00000000-0000-0000-0000-000000000104',
-    '00000000-0000-0000-0000-000000000001',
-    'CAS-401',
-    'Casa Campestre Exclusiva en Envigado Las Brujas',
-    'Hermosa casa campestre en unidad cerrada exclusiva. Lote independiente de 600m2 con jardines, jacuzzi privado y acabados rústicos modernos.',
-    'casa', 'compra', 'Envigado', 'Las Brujas',
-    'Loma de las Brujas Calle 38 Sur # 22-100 Casa 8 (Propietario: Mauricio Vélez)',
-    1450000000, 480000, 290, 4, 4, 3, 5,
-    ARRAY['Jacuzzi Privado', 'Jardín', 'Zona BBQ', '3 Parqueaderos'],
-    ARRAY['https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?auto=format&fit=crop&w=1200&q=80'],
-    'disponible', 'Laura Gómez', true
-)
-ON CONFLICT (organization_id, code) DO NOTHING;
 
 -- ==============================================================================
 -- 11. PERMISOS DE ACCESO PARA ROLES DE SUPABASE (anon / authenticated)
+-- Principio de mínimo privilegio: 'anon' no tiene permisos directos sobre tablas privadas.
 -- ==============================================================================
+REVOKE ALL ON public.properties FROM anon;
+REVOKE ALL ON public.property_private_details FROM anon;
+REVOKE ALL ON public.leads FROM anon;
+REVOKE ALL ON public.lead_activities FROM anon;
+REVOKE ALL ON public.organization_members FROM anon;
+
 GRANT USAGE ON SCHEMA public TO anon, authenticated;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, service_role;
 
-GRANT SELECT ON public.public_properties TO anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.properties TO anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads TO anon, authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.lead_activities TO anon, authenticated;
-GRANT SELECT, UPDATE ON public.organizations TO anon, authenticated;
-GRANT SELECT ON public.organization_members TO authenticated;
+-- Permisos públicos autorizados para 'anon'
+GRANT SELECT ON public.public_properties TO anon;
+GRANT SELECT ON public.organizations TO anon;
 
+-- Permisos para usuarios autenticados (filtrados por las políticas RLS anteriores)
+GRANT SELECT ON public.public_properties TO authenticated;
+GRANT SELECT, UPDATE ON public.organizations TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.properties TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.property_private_details TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.lead_activities TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.organization_members TO authenticated;
+
+-- Permisos de ejecución de funciones
+GRANT EXECUTE ON FUNCTION public.is_org_member(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated;

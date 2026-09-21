@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
-import { authenticateAdminRequest, unauthorizedResponse } from '@/core/auth/auth-guard';
+import {
+  authenticateAdminRequest,
+  unauthorizedResponse,
+  forbiddenResponse,
+  hasRequiredRole,
+} from '@/core/auth/auth-guard';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -37,6 +42,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para modificar inmuebles.');
     }
 
+    // RBAC: viewer cannot update
+    if (!hasRequiredRole(authSession, ['owner', 'admin', 'agent'])) {
+      return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para modificar inmuebles.');
+    }
+
     const updated = await UnifiedDataService.updateProperty(id, body);
     return NextResponse.json({ success: true, property: updated });
   } catch (error: any) {
@@ -50,6 +60,11 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const authSession = await authenticateAdminRequest(req);
     if (!authSession) {
       return unauthorizedResponse('Operación administrativa restringida: Se requiere autenticación para eliminar inmuebles.');
+    }
+
+    // RBAC: only owner and admin can delete properties
+    if (!hasRequiredRole(authSession, ['owner', 'admin'])) {
+      return forbiddenResponse('Solo los roles owner y admin tienen permisos para eliminar inmuebles.');
     }
 
     const deleted = await UnifiedDataService.deleteProperty(id);

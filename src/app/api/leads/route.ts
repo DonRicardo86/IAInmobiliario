@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
-import { authenticateAdminRequest } from '@/core/auth/auth-guard';
-import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
+import {
+  authenticateAdminRequest,
+  unauthorizedResponse,
+  forbiddenResponse,
+  rateLimitResponse,
+  hasRequiredRole,
+  checkRateLimit,
+} from '@/core/auth/auth-guard';
+import { DEFAULT_ORGANIZATION, KNOWN_ORGANIZATIONS } from '@/core/types/organization';
 
 export async function GET(req: NextRequest) {
   try {
@@ -30,6 +37,7 @@ export async function GET(req: NextRequest) {
     const leads = await UnifiedDataService.getLeads(filters, orgId);
     const stats = await UnifiedDataService.getStats(orgId);
 
+    // If unauthenticated in public demo mode, mask contact information
     const sanitizedLeads = !authSession
       ? leads.map((l) => ({
           ...l,
@@ -52,6 +60,21 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const authSession = await authenticateAdminRequest(req);
+
+    // If authenticated: enforce RBAC role permissions
+    if (authSession) {
+      if (!hasRequiredRole(authSession, ['owner', 'admin', 'agent'])) {
+        return forbiddenResponse('Tu rol de solo lectura (viewer) no tiene permisos para crear prospectos.');
+      }
+    } else {
+      // If unauthenticated: apply anti-abuse rate limiter
+      const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+      const isAllowed = checkRateLimit(clientIp, 15, 60000);
+      if (!isAllowed) {
+        return rateLimitResponse('Has enviado demasiadas solicitudes. Por favor espera un minuto antes de reintentar.');
+      }
+    }
 
     // Protection & strict validation
     if (!body.name?.trim()) {
@@ -61,11 +84,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'El teléfono es obligatorio' }, { status: 400 });
     }
     if (body.consentHabeasData === false) {
-      return NextResponse.json({ success: false, error: 'Se requiere la autorización de tratamiento de datos personales.' }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'Se requiere la autorización de tratamiento de datos personales (Ley Habeas Data).' },
+        { status: 400 }
+      );
     }
 
-    const authSession = await authenticateAdminRequest(req);
-    const targetOrgId = authSession?.organizationId || body.organizationId || DEFAULT_ORGANIZATION.id;
+    // Determine target organization safely
+    let targetOrgId = DEFAULT_ORGANIZATION.id;
+    if (authSession) {
+      targetOrgId = authSession.organizationId;
+    } else if (body.organizationId && KNOWN_ORGANIZATIONS[body.organizationId]) {
+      targetOrgId = body.organizationId;
+    }
 
     // Check duplicate
     if (body.email || body.phone) {
@@ -73,16 +104,19 @@ export async function POST(req: NextRequest) {
       if (existing && !body.allowDuplicate) {
         const updated = await UnifiedDataService.addLeadActivity(
           existing.id,
-          `Nueva interacción registrada desde formulario web. Notas: ${body.notes || 'Consulta recurrente'}`,
+          `Nueva interacción registrada desde captación web. Notas: ${body.notes || 'Consulta recurrente'}`,
           'contact_attempt',
           'Sistema'
         );
-        return NextResponse.json({
-          success: true,
-          lead: updated,
-          duplicateDetected: true,
-          demoMode: !authSession,
-        }, { status: 200 });
+        return NextResponse.json(
+          {
+            success: true,
+            lead: updated,
+            duplicateDetected: true,
+            demoMode: !authSession,
+          },
+          { status: 200 }
+        );
       }
     }
 
@@ -90,6 +124,7 @@ export async function POST(req: NextRequest) {
       ...body,
       organizationId: targetOrgId,
       consentHabeasData: body.consentHabeasData !== false,
+      source: body.source || (authSession ? 'manual' : 'web_form'),
     });
 
     return NextResponse.json({ success: true, lead: newLead, demoMode: !authSession }, { status: 201 });
