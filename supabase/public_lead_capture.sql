@@ -216,3 +216,7 @@ REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VA
 
 -- 2. Conceder EXECUTE EXCLUSIVAMENTE a service_role (backend autenticado del servidor)
 GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;
+
+-- 3. Recarga inmediata de caché de PostgREST
+NOTIFY pgrst, 'reload schema';
+

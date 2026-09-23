@@ -30,32 +30,81 @@ export function getSupabaseAnonClient(): SupabaseClient | null {
 export interface AdminKeyInspection {
   isConfigured: boolean;
   role?: string;
+  projectRef?: string;
   isValidJwt: boolean;
   isServiceRole: boolean;
+  isMatchingAnon: boolean;
+  urlProjectRef?: string;
+  isProjectMatching: boolean;
 }
 
 export function inspectAdminKey(): AdminKeyInspection {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!serviceKey) {
-    return { isConfigured: false, isValidJwt: false, isServiceRole: false };
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  let urlProjectRef: string | undefined;
+  if (url) {
+    const match = url.match(/https?:\/\/([^.]+)\.supabase\.co/i);
+    if (match && match[1]) {
+      urlProjectRef = match[1];
+    }
   }
-  const cleanKey = serviceKey.trim().replace(/^["']|["']$/g, '');
+
+  if (!serviceKey) {
+    return {
+      isConfigured: false,
+      isValidJwt: false,
+      isServiceRole: false,
+      isMatchingAnon: false,
+      urlProjectRef,
+      isProjectMatching: true,
+    };
+  }
+
+  const cleanKey = serviceKey
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+
+  const cleanAnonKey = anonKey
+    ? anonKey.trim().replace(/^["']|["']$/g, '').replace(/^Bearer\s+/i, '').trim()
+    : undefined;
+
+  const isMatchingAnon = !!(cleanAnonKey && cleanKey === cleanAnonKey);
+
   try {
     const parts = cleanKey.split('.');
     if (parts.length === 3) {
       const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
       const role = typeof payload.role === 'string' ? payload.role : undefined;
+      const projectRef = typeof payload.ref === 'string' ? payload.ref : undefined;
+      const isProjectMatching = !urlProjectRef || !projectRef || urlProjectRef === projectRef;
+
       return {
         isConfigured: true,
         role,
+        projectRef,
         isValidJwt: true,
         isServiceRole: role === 'service_role',
+        isMatchingAnon: isMatchingAnon || role === 'anon',
+        urlProjectRef,
+        isProjectMatching,
       };
     }
   } catch {
     // Non-standard or opaque token
   }
-  return { isConfigured: true, isValidJwt: false, isServiceRole: false };
+
+  return {
+    isConfigured: true,
+    isValidJwt: false,
+    isServiceRole: false,
+    isMatchingAnon,
+    urlProjectRef,
+    isProjectMatching: true,
+  };
 }
 
 export function getSupabaseAdminClient(): SupabaseClient | null {
@@ -65,14 +114,26 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
   const rawServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (url && rawServiceKey && url.startsWith('http')) {
-    const cleanKey = rawServiceKey.trim().replace(/^["']|["']$/g, '');
+    const cleanKey = rawServiceKey
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/^Bearer\s+/i, '')
+      .trim();
+
     if (!cleanKey) return null;
 
     const keyMeta = inspectAdminKey();
-    if (keyMeta.isConfigured && keyMeta.role === 'anon') {
+
+    if (keyMeta.isMatchingAnon || keyMeta.role === 'anon') {
       console.error(
-        '[SupabaseAdapter] ERROR CRÍTICO DE CONFIGURACIÓN: SUPABASE_SERVICE_ROLE_KEY tiene rol "anon" en lugar de "service_role". ' +
-        'Por favor actualiza la variable en Vercel con la clave secreta (service_role) obtenida en Supabase Dashboard -> Settings -> API.'
+        '[SupabaseAdapter] ERROR CRÍTICO DE AUTORIZACIÓN: SUPABASE_SERVICE_ROLE_KEY tiene el rol "anon" o es idéntica a NEXT_PUBLIC_SUPABASE_ANON_KEY. ' +
+        'Debes copiar la clave secreta "service_role" desde Supabase Dashboard -> Project Settings -> API.'
+      );
+    }
+
+    if (!keyMeta.isProjectMatching && keyMeta.projectRef && keyMeta.urlProjectRef) {
+      console.error(
+        `[SupabaseAdapter] ERROR CRÍTICO DE PROYECTO: SUPABASE_SERVICE_ROLE_KEY pertenece al proyecto "${keyMeta.projectRef}", pero NEXT_PUBLIC_SUPABASE_URL es para "${keyMeta.urlProjectRef}".`
       );
     }
 
@@ -82,6 +143,7 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
           persistSession: false,
           autoRefreshToken: false,
           detectSessionInUrl: false,
+          storageKey: 'sb-admin-auth-token-isolated',
         },
         global: {
           headers: {
