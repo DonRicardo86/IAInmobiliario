@@ -27,16 +27,68 @@ export function getSupabaseAnonClient(): SupabaseClient | null {
   return null;
 }
 
+export interface AdminKeyInspection {
+  isConfigured: boolean;
+  role?: string;
+  isValidJwt: boolean;
+  isServiceRole: boolean;
+}
+
+export function inspectAdminKey(): AdminKeyInspection {
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!serviceKey) {
+    return { isConfigured: false, isValidJwt: false, isServiceRole: false };
+  }
+  const cleanKey = serviceKey.trim().replace(/^["']|["']$/g, '');
+  try {
+    const parts = cleanKey.split('.');
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      const role = typeof payload.role === 'string' ? payload.role : undefined;
+      return {
+        isConfigured: true,
+        role,
+        isValidJwt: true,
+        isServiceRole: role === 'service_role',
+      };
+    }
+  } catch {
+    // Non-standard or opaque token
+  }
+  return { isConfigured: true, isValidJwt: false, isServiceRole: false };
+}
+
 export function getSupabaseAdminClient(): SupabaseClient | null {
   if (supabaseAdminClient) return supabaseAdminClient;
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const rawServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (url && serviceKey && url.startsWith('http')) {
+  if (url && rawServiceKey && url.startsWith('http')) {
+    const cleanKey = rawServiceKey.trim().replace(/^["']|["']$/g, '');
+    if (!cleanKey) return null;
+
+    const keyMeta = inspectAdminKey();
+    if (keyMeta.isConfigured && keyMeta.role === 'anon') {
+      console.error(
+        '[SupabaseAdapter] ERROR CRÍTICO DE CONFIGURACIÓN: SUPABASE_SERVICE_ROLE_KEY tiene rol "anon" en lugar de "service_role". ' +
+        'Por favor actualiza la variable en Vercel con la clave secreta (service_role) obtenida en Supabase Dashboard -> Settings -> API.'
+      );
+    }
+
     try {
-      supabaseAdminClient = createClient(url, serviceKey, {
-        auth: { persistSession: false },
+      supabaseAdminClient = createClient(url, cleanKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+        global: {
+          headers: {
+            apikey: cleanKey,
+            Authorization: `Bearer ${cleanKey}`,
+          },
+        },
       });
       return supabaseAdminClient;
     } catch (e) {
@@ -750,148 +802,45 @@ export class UnifiedDataService {
         }
       }
 
-      let rpcAttempted = false;
-      let rpcErrorCode: string | undefined;
-      let rpcErrorMessage: string | undefined;
+      // Ejecución exclusiva transaccional mediante capture_public_lead con privilegios de service_role
+      const { data: rpcData, error: rpcError } = await adminSupabase.rpc('capture_public_lead', {
+        p_organization_id: resolvedOrgId,
+        p_name: cleanName,
+        p_phone: cleanPhone,
+        p_email: cleanEmail,
+        p_operation_type: leadData.operationType || 'compra',
+        p_property_type: leadData.propertyType || 'apartamento',
+        p_municipality: leadData.municipality || 'Medellín',
+        p_zone: leadData.zone || 'El Poblado',
+        p_budget: Number(leadData.budget) || 0,
+        p_interested_property_ids: verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs,
+        p_notes: leadData.notes || '',
+        p_consent_habeas_data: true,
+        p_source: leadData.source || 'asistente_ia',
+        p_client_ip: clientIp,
+      });
 
-      // Intento A: Invocar el procedimiento atómico capture_public_lead con privilegios service_role
-      try {
-        rpcAttempted = true;
-        const { data: rpcData, error: rpcError } = await adminSupabase.rpc('capture_public_lead', {
-          p_organization_id: resolvedOrgId,
-          p_name: cleanName,
-          p_phone: cleanPhone,
-          p_email: cleanEmail,
-          p_operation_type: leadData.operationType || 'compra',
-          p_property_type: leadData.propertyType || 'apartamento',
-          p_municipality: leadData.municipality || 'Medellín',
-          p_zone: leadData.zone || 'El Poblado',
-          p_budget: Number(leadData.budget) || 0,
-          p_interested_property_ids: verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs,
-          p_notes: leadData.notes || '',
-          p_consent_habeas_data: true,
-          p_source: leadData.source || 'asistente_ia',
-          p_client_ip: clientIp,
-        });
-
-        if (!rpcError && rpcData && typeof rpcData === 'object') {
-          return {
-            success: rpcData.success ?? true,
-            leadId: rpcData.lead_id,
-            isDuplicate: rpcData.is_duplicate,
-            message: rpcData.message || 'Prospecto registrado exitosamente en Supabase.',
-          };
-        }
-
-        if (rpcError) {
-          rpcErrorCode = rpcError.code;
-          rpcErrorMessage = rpcError.message;
-          console.warn(`[SupabaseAdapter] RPC capture_public_lead error [${rpcError.code}]: ${rpcError.message}. Switching to Direct Admin Insert.`);
-        }
-      } catch (rpcEx: any) {
-        rpcErrorMessage = rpcEx.message;
-        console.warn('[SupabaseAdapter] RPC invocation exception, falling back to direct admin insert:', rpcEx.message);
+      if (!rpcError && rpcData && typeof rpcData === 'object') {
+        return {
+          success: rpcData.success ?? true,
+          leadId: rpcData.lead_id,
+          isDuplicate: rpcData.is_duplicate,
+          message: rpcData.message || 'Prospecto registrado exitosamente en Supabase.',
+        };
       }
 
-      // Intento B: Inserción directa mediante cliente service_role con validación de duplicados
-      try {
-        const { data: existingLead } = await adminSupabase
-          .from('leads')
-          .select('id')
-          .eq('organization_id', resolvedOrgId)
-          .or(`email.eq.${cleanEmail},phone.eq.${cleanPhone}`)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (existingLead) {
-          await adminSupabase.from('lead_activities').insert({
-            lead_id: existingLead.id,
-            description: `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${verifiedPropertyCodes.join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
-            type: 'contact_attempt',
-            author: 'Asistente SofIA',
-          });
-
-          return {
-            success: true,
-            leadId: existingLead.id,
-            isDuplicate: true,
-            message: 'Solicitud actualizada para el prospecto existente en el CRM.',
-          };
-        }
-
-        // Se usa resolvedPropertyUuids (array de UUIDs válidos) para garantizar compatibilidad estricta con UUID[]
-        const payload = this.mapDomainLeadToSupabase({
-          organizationId: resolvedOrgId,
-          name: cleanName,
-          phone: cleanPhone,
-          email: cleanEmail,
-          operationType: leadData.operationType || 'compra',
-          propertyType: leadData.propertyType || 'apartamento',
-          municipality: leadData.municipality || 'Medellín',
-          zone: leadData.zone || 'El Poblado',
-          budget: Number(leadData.budget) || 0,
-          currency: 'COP',
-          desiredFeatures: [],
-          interestedPropertyIds: resolvedPropertyUuids,
-          notes: leadData.notes || '',
-          status: 'nuevo',
-          priority: 'alto',
-          source: leadData.source || 'asistente_ia',
-          assignedAgent: 'Por Asignar',
-          consentHabeasData: true,
-        });
-
-        const { data: insertedLead, error: insertError } = await adminSupabase
-          .from('leads')
-          .insert(payload)
-          .select('id')
-          .single();
-
-        if (insertError) {
-          console.error('[SupabaseAdapter] Admin lead insertion error in PostgreSQL:', insertError);
-          throw new LeadPersistenceError(
-            `Error en PostgreSQL al registrar prospecto: ${insertError.message}`,
-            {
-              stage: 'ADMIN_INSERT',
-              code: insertError.code ? `PG_${insertError.code}` : 'ERR_POSTGRES_INSERT',
-              dbErrorCode: insertError.code,
-              dbErrorMessage: insertError.message,
-              rpcAttempted,
-              rpcErrorCode,
-              rpcErrorMessage,
-              adminClientConfigured: true,
-              resolvedOrgId,
-            }
-          );
-        }
-
-        if (insertedLead) {
-          await adminSupabase.from('lead_activities').insert({
-            lead_id: insertedLead.id,
-            description: `Prospecto captado exitosamente mediante ${leadData.source || 'asistente_ia'}. Inmuebles de interés: ${verifiedPropertyCodes.join(', ') || 'General'}. Autorización Habeas Data verificada.`,
-            type: 'created',
-            author: 'Sistema IA',
-          });
-
-          return {
-            success: true,
-            leadId: insertedLead.id,
-            isDuplicate: false,
-            message: 'Prospecto creado exitosamente en el CRM.',
-          };
-        }
-      } catch (err: any) {
-        if (err instanceof LeadPersistenceError) throw err;
-        console.error('[SupabaseAdapter] Exception in direct admin insert:', err);
+      if (rpcError) {
+        console.error(`[SupabaseAdapter] RPC capture_public_lead failed [${rpcError.code}]:`, rpcError.message);
         throw new LeadPersistenceError(
-          err.message || 'Error al persistir prospecto en Supabase.',
+          `Error en Supabase al registrar prospecto: ${rpcError.message}`,
           {
-            stage: 'ADMIN_INSERT',
-            code: 'ERR_ADMIN_INSERT_EXCEPTION',
-            dbErrorMessage: err.message,
-            rpcAttempted,
-            rpcErrorCode,
+            stage: 'RPC_EXECUTION',
+            code: rpcError.code ? `PG_${rpcError.code}` : 'ERR_RPC_EXECUTION',
+            dbErrorCode: rpcError.code,
+            dbErrorMessage: rpcError.message,
+            rpcAttempted: true,
+            rpcErrorCode: rpcError.code,
+            rpcErrorMessage: rpcError.message,
             adminClientConfigured: true,
             resolvedOrgId,
           }

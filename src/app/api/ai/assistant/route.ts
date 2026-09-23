@@ -119,21 +119,38 @@ export async function POST(req: NextRequest) {
           message: `¡Muchas gracias, ${name.trim()}! Hemos registrado tu solicitud en el CRM de ${org.name}. Un asesor comercial se comunicará contigo al ${phone} o ${email} para coordinar la atención y agendar visitas.`,
         });
       } catch (leadError: any) {
-        console.error('[AssistantRoute] Error persisting public lead:', leadError);
-        const diagnostic = leadError instanceof LeadPersistenceError
+        const correlationId = `cor_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
+        const rawDiagnostic = leadError instanceof LeadPersistenceError
           ? leadError.diagnostic
           : {
-              stage: 'PERSISTENCE_UNKNOWN',
+              stage: 'PERSISTENCE_UNKNOWN' as const,
               code: leadError.code || 'ERR_LEAD_PERSISTENCE',
-              adminClientConfigured: !!getSupabaseAdminClient(),
+              dbErrorMessage: leadError.message,
             };
 
+        // Registro detallado en servidor para auditoría
+        console.error(`[AssistantRoute][${correlationId}] Error en persistencia de prospecto público:`, {
+          correlationId,
+          stage: rawDiagnostic.stage,
+          code: rawDiagnostic.code,
+          dbErrorCode: (rawDiagnostic as any).dbErrorCode,
+          dbErrorMessage: (rawDiagnostic as any).dbErrorMessage,
+          rpcErrorCode: (rawDiagnostic as any).rpcErrorCode,
+          rpcErrorMessage: (rawDiagnostic as any).rpcErrorMessage,
+          resolvedOrgId: (rawDiagnostic as any).resolvedOrgId,
+        });
+
+        // Respuesta pública segura sin detalles internos de base de datos
         return NextResponse.json(
           {
             success: false,
             error: 'No fue posible registrar tu solicitud automáticamente en este momento.',
             message: `No fue posible registrar la solicitud en el sistema. Puedes comunicarte directamente con nuestro asesor comercial vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
-            diagnostic,
+            diagnostic: {
+              correlationId,
+              stage: rawDiagnostic.stage || 'RPC_EXECUTION',
+              code: rawDiagnostic.code || 'ERR_LEAD_PERSISTENCE',
+            },
             fallbackContact: FALLBACK_CONTACT,
           },
           { status: 500 }

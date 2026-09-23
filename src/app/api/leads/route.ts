@@ -186,21 +186,36 @@ export async function POST(req: NextRequest) {
       { status: 201 }
     );
   } catch (error: any) {
-    console.error('[LeadsRoute] Error in POST /api/leads:', error);
-    const diagnostic = error instanceof LeadPersistenceError
+    const correlationId = `cor_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
+    const rawDiagnostic = error instanceof LeadPersistenceError
       ? error.diagnostic
       : {
-          stage: 'PERSISTENCE_UNKNOWN',
+          stage: 'PERSISTENCE_UNKNOWN' as const,
           code: error.code || 'ERR_LEAD_POST',
-          adminClientConfigured: !!getSupabaseAdminClient(),
+          dbErrorMessage: error.message,
         };
+
+    console.error(`[LeadsRoute][${correlationId}] Error en POST /api/leads:`, {
+      correlationId,
+      stage: rawDiagnostic.stage,
+      code: rawDiagnostic.code,
+      dbErrorCode: (rawDiagnostic as any).dbErrorCode,
+      dbErrorMessage: (rawDiagnostic as any).dbErrorMessage,
+      rpcErrorCode: (rawDiagnostic as any).rpcErrorCode,
+      rpcErrorMessage: (rawDiagnostic as any).rpcErrorMessage,
+      resolvedOrgId: (rawDiagnostic as any).resolvedOrgId,
+    });
 
     return NextResponse.json(
       {
         success: false,
-        error: error.message || 'No fue posible registrar la solicitud en este momento.',
+        error: 'No fue posible registrar la solicitud en este momento.',
         message: `No fue posible registrar la solicitud en el CRM. Puedes contactarnos directamente vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
-        diagnostic,
+        diagnostic: {
+          correlationId,
+          stage: rawDiagnostic.stage || 'PERSISTENCE_UNKNOWN',
+          code: rawDiagnostic.code || 'ERR_LEAD_POST',
+        },
         fallbackContact: FALLBACK_CONTACT,
       },
       { status: 400 }
