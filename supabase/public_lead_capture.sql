@@ -42,13 +42,13 @@ DECLARE
     v_verified_props TEXT[] := '{}';
 BEGIN
     -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
-    -- El valor debe ser explícitamente TRUE; no se asume consentimiento por defecto.
+    -- El consentimiento es estrictamente obligatorio; no se admite DEFAULT TRUE.
     IF p_consent_habeas_data IS NOT TRUE THEN
-        RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data).'
+        RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data Ley 1581 de 2012).'
             USING ERRCODE = '22000';
     END IF;
 
-    -- 2. Validar datos mínimos obligatorios
+    -- 2. Validar datos mínimos de contacto obligatorios
     v_name := TRIM(COALESCE(p_name, ''));
     v_phone := TRIM(COALESCE(p_phone, ''));
     v_email := LOWER(TRIM(COALESCE(p_email, '')));
@@ -58,7 +58,7 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 3. Validar existencia y vigencia de la organización receptora en public.organizations
+    -- 3. Validar existencia y vigencia de la organización receptora
     SELECT id, name INTO v_org_id, v_org_name
     FROM public.organizations
     WHERE id = p_organization_id;
@@ -68,7 +68,8 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 4. Validar y recolectar inmuebles de interés de esa organización
+    -- 4. Validar referencias de inmuebles de interés dentro de la organización
+    -- Se comprueba que cada inmueble referenciado pertenezca efectivamente a la organización.
     IF p_interested_property_ids IS NOT NULL AND array_length(p_interested_property_ids, 1) > 0 THEN
         FOREACH v_prop_ref IN ARRAY p_interested_property_ids
         LOOP
@@ -79,14 +80,12 @@ BEGIN
 
                 IF FOUND THEN
                     v_verified_props := array_append(v_verified_props, TRIM(v_prop_ref));
+                ELSE
+                    RAISE EXCEPTION 'El inmueble de interés "%" no pertenece a la organización receptora.', TRIM(v_prop_ref)
+                        USING ERRCODE = '22000';
                 END IF;
             END IF;
         END LOOP;
-    END IF;
-
-    -- Si se enviaron referencias de inmueble no registradas, conservarlas para registro comercial
-    IF (v_verified_props IS NULL OR array_length(v_verified_props, 1) = 0) AND p_interested_property_ids IS NOT NULL THEN
-        v_verified_props := p_interested_property_ids;
     END IF;
 
     -- 5. Detección de duplicados para la misma organización (por correo o teléfono)
@@ -118,7 +117,7 @@ BEGIN
         );
     END IF;
 
-    -- 6. Inserción protegida de nuevo prospecto (campos administrativos fijados estrictamente por el servidor)
+    -- 6. Inserción protegida de nuevo prospecto
     INSERT INTO public.leads (
         organization_id,
         name,
@@ -182,13 +181,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 -- ==============================================================================
 -- GESTIÓN ESTRICTA DE PRIVILEGIOS MÍNIMOS (Acceso exclusivo a service_role)
 -- ==============================================================================
--- 1. Revocar permisos a roles no autorizados
 REVOKE ALL ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM authenticated;
-
--- 2. Conceder EXECUTE EXCLUSIVAMENTE a service_role
 GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;
 
--- 3. Notificar a PostgREST para recargar el esquema inmediatamente
 NOTIFY pgrst, 'reload schema';

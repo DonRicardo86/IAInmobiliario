@@ -3,7 +3,7 @@
 -- IA Inmobiliaria - Procedimiento Exclusivo de Servidor (service_role)
 -- ==============================================================================
 -- Instrucciones:
--- Este script crea o actualiza exclusivamente el procedimiento public.capture_public_lead,
+-- Este script define exclusivamente el procedimiento public.capture_public_lead,
 -- restringe su ejecución al rol service_role (sin acceso para anon ni authenticated)
 -- y notifica a PostgREST para actualizar su catálogo de funciones.
 -- No modifica tablas, no altera tipos de columna ni concede privilegios generalizados.
@@ -37,14 +37,14 @@ DECLARE
     v_prop_ref TEXT;
     v_verified_props TEXT[] := '{}';
 BEGIN
-    -- 1. Validar autorización de datos personales (Habeas Data)
-    -- El valor debe ser explícitamente TRUE; no se asume consentimiento por defecto.
+    -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
+    -- El consentimiento es estrictamente obligatorio; no se admite DEFAULT TRUE.
     IF p_consent_habeas_data IS NOT TRUE THEN
-        RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data).'
+        RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data Ley 1581 de 2012).'
             USING ERRCODE = '22000';
     END IF;
 
-    -- 2. Validar datos mínimos obligatorios
+    -- 2. Validar datos mínimos de contacto obligatorios
     v_name := TRIM(COALESCE(p_name, ''));
     v_phone := TRIM(COALESCE(p_phone, ''));
     v_email := LOWER(TRIM(COALESCE(p_email, '')));
@@ -54,7 +54,7 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 3. Validar existencia de la organización receptora
+    -- 3. Validar existencia y vigencia de la organización receptora
     SELECT id, name INTO v_org_id, v_org_name
     FROM public.organizations
     WHERE id = p_organization_id;
@@ -64,7 +64,8 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 4. Validar referencias de inmuebles
+    -- 4. Validar referencias de inmuebles de interés dentro de la organización
+    -- Se comprueba que cada inmueble referenciado pertenezca efectivamente a la organización.
     IF p_interested_property_ids IS NOT NULL AND array_length(p_interested_property_ids, 1) > 0 THEN
         FOREACH v_prop_ref IN ARRAY p_interested_property_ids
         LOOP
@@ -75,16 +76,15 @@ BEGIN
 
                 IF FOUND THEN
                     v_verified_props := array_append(v_verified_props, TRIM(v_prop_ref));
+                ELSE
+                    RAISE EXCEPTION 'El inmueble de interés "%" no pertenece a la organización receptora.', TRIM(v_prop_ref)
+                        USING ERRCODE = '22000';
                 END IF;
             END IF;
         END LOOP;
     END IF;
 
-    IF (v_verified_props IS NULL OR array_length(v_verified_props, 1) = 0) AND p_interested_property_ids IS NOT NULL THEN
-        v_verified_props := p_interested_property_ids;
-    END IF;
-
-    -- 5. Control de duplicados
+    -- 5. Detección de duplicados para la misma organización (por correo o teléfono)
     SELECT id INTO v_existing_lead_id
     FROM public.leads
     WHERE organization_id = p_organization_id
@@ -93,6 +93,7 @@ BEGIN
     LIMIT 1;
 
     IF v_existing_lead_id IS NOT NULL THEN
+        -- Registrar nueva interacción en el historial del prospecto existente
         INSERT INTO public.lead_activities (lead_id, description, type, author)
         VALUES (
             v_existing_lead_id,
@@ -112,7 +113,7 @@ BEGIN
         );
     END IF;
 
-    -- 6. Inserción atómica de nuevo prospecto
+    -- 6. Inserción protegida de nuevo prospecto
     INSERT INTO public.leads (
         organization_id,
         name,
@@ -154,7 +155,7 @@ BEGIN
     )
     RETURNING id INTO v_new_lead_id;
 
-    -- 7. Actividad inicial
+    -- 7. Registrar actividad inicial atómica
     INSERT INTO public.lead_activities (lead_id, description, type, author)
     VALUES (
         v_new_lead_id,
