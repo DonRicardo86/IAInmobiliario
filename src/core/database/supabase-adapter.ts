@@ -877,7 +877,7 @@ export class UnifiedDataService {
         p_budget: Number(leadData.budget) || 0,
         p_interested_property_ids: verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs,
         p_notes: leadData.notes || '',
-        p_consent_habeas_data: true,
+        p_consent_habeas_data: leadData.consentHabeasData === true,
         p_source: leadData.source || 'asistente_ia',
         p_client_ip: clientIp,
       });

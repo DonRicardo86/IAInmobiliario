@@ -1,37 +1,14 @@
 -- ==============================================================================
--- SCRIPT MÍNIMO DE PRIVILEGIOS Y PROCEDIMIENTO DE CAPTACIÓN
--- IA Inmobiliaria - Corrección de Permisos PostgreSQL 42501
+-- SCRIPT MÍNIMO Y SEGURO DE CAPTACIÓN DE PROSPECTOS
+-- IA Inmobiliaria - Procedimiento Exclusivo de Servidor (service_role)
 -- ==============================================================================
--- Ejecutar en Supabase SQL Editor si persisten errores de permisos en PostgREST.
+-- Instrucciones:
+-- Este script crea o actualiza exclusivamente el procedimiento public.capture_public_lead,
+-- restringe su ejecución al rol service_role (sin acceso para anon ni authenticated)
+-- y notifica a PostgREST para actualizar su catálogo de funciones.
+-- No modifica tablas, no altera tipos de columna ni concede privilegios generalizados.
 -- ==============================================================================
 
--- 1. ASEGURAR PRIVILEGIOS AL ROL ADMINISTRATIVO (service_role)
-GRANT USAGE ON SCHEMA public TO service_role, anon, authenticated;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL ROUTINES IN SCHEMA public TO service_role;
-
--- 2. MIGRACIÓN IDEMPOTENTE DEL CAMPO DE INMUEBLES DE INTERÉS
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = 'public' 
-          AND table_name = 'leads' 
-          AND column_name = 'interested_property_ids'
-    ) THEN
-        ALTER TABLE public.leads 
-        ALTER COLUMN interested_property_ids TYPE TEXT[] 
-        USING interested_property_ids::TEXT[];
-    END IF;
-END $$;
-
--- 3. LIMPIEZA DE POSIBLES SOBRECARGAS PREVIAS
-DROP FUNCTION IF EXISTS public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, UUID[], TEXT, BOOLEAN, VARCHAR, TEXT) CASCADE;
-DROP FUNCTION IF EXISTS public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) CASCADE;
-DROP FUNCTION IF EXISTS public.capture_public_lead CASCADE;
-
--- 4. CREACIÓN DEL PROCEDIMIENTO SEGURO DE CAPTACIÓN
 CREATE OR REPLACE FUNCTION public.capture_public_lead(
     p_organization_id UUID,
     p_name VARCHAR,
@@ -44,7 +21,7 @@ CREATE OR REPLACE FUNCTION public.capture_public_lead(
     p_budget NUMERIC DEFAULT 0,
     p_interested_property_ids TEXT[] DEFAULT '{}',
     p_notes TEXT DEFAULT '',
-    p_consent_habeas_data BOOLEAN DEFAULT true,
+    p_consent_habeas_data BOOLEAN DEFAULT false,
     p_source VARCHAR DEFAULT 'asistente_ia',
     p_client_ip TEXT DEFAULT 'web'
 )
@@ -60,7 +37,8 @@ DECLARE
     v_prop_ref TEXT;
     v_verified_props TEXT[] := '{}';
 BEGIN
-    -- 1. Validar autorización de datos personales
+    -- 1. Validar autorización de datos personales (Habeas Data)
+    -- El valor debe ser explícitamente TRUE; no se asume consentimiento por defecto.
     IF p_consent_habeas_data IS NOT TRUE THEN
         RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data).'
             USING ERRCODE = '22000';
@@ -195,12 +173,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
--- 5. ASIGNACIÓN ESTRICTA DE PRIVILEGIOS DE EJECUCIÓN
+-- ==============================================================================
+-- PRIVILEGIOS ESTRICTOS Y NOTIFICACIÓN
+-- ==============================================================================
 REVOKE ALL ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;
 
--- 6. RECARGA INMEDIATA DE CACHÉ DE POSTGREST
 NOTIFY pgrst, 'reload schema';
-

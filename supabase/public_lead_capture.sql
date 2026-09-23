@@ -13,34 +13,6 @@
 -- Su ejecución está restringida EXCLUSIVAMENTE al rol 'service_role' del servidor.
 -- ==============================================================================
 
--- 0. MIGRACIÓN PREVENTIVA DE TIPO DE COLUMNA (Idempotente)
--- Permite almacenar tanto códigos (ej. 'INM-585') como UUIDs sin errores de casteo
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = 'public' 
-          AND table_name = 'leads' 
-          AND column_name = 'interested_property_ids'
-    ) THEN
-        ALTER TABLE public.leads 
-        ALTER COLUMN interested_property_ids TYPE TEXT[] 
-        USING interested_property_ids::TEXT[];
-    END IF;
-END $$;
-
--- 0.1 ASEGURAR PRIVILEGIOS DE ESQUEMA Y TABLAS AL ROL ADMINISTRATIVO (service_role)
-GRANT USAGE ON SCHEMA public TO service_role, anon, authenticated;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL ROUTINES IN SCHEMA public TO service_role;
-
--- 0.2 LIMPIEZA DE SOBRECARGAS ANTERIORES (Evita colisiones entre UUID[] y TEXT[])
-DROP FUNCTION IF EXISTS public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, UUID[], TEXT, BOOLEAN, VARCHAR, TEXT) CASCADE;
-DROP FUNCTION IF EXISTS public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) CASCADE;
-DROP FUNCTION IF EXISTS public.capture_public_lead CASCADE;
-
--- 1. CREACIÓN DE LA FUNCIÓN RPC PRIVILEGIADA
 CREATE OR REPLACE FUNCTION public.capture_public_lead(
     p_organization_id UUID,
     p_name VARCHAR,
@@ -53,7 +25,7 @@ CREATE OR REPLACE FUNCTION public.capture_public_lead(
     p_budget NUMERIC DEFAULT 0,
     p_interested_property_ids TEXT[] DEFAULT '{}',
     p_notes TEXT DEFAULT '',
-    p_consent_habeas_data BOOLEAN DEFAULT true,
+    p_consent_habeas_data BOOLEAN DEFAULT false,
     p_source VARCHAR DEFAULT 'asistente_ia',
     p_client_ip TEXT DEFAULT 'web'
 )
@@ -70,6 +42,7 @@ DECLARE
     v_verified_props TEXT[] := '{}';
 BEGIN
     -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
+    -- El valor debe ser explícitamente TRUE; no se asume consentimiento por defecto.
     IF p_consent_habeas_data IS NOT TRUE THEN
         RAISE EXCEPTION 'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data).'
             USING ERRCODE = '22000';
@@ -207,16 +180,15 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- ==============================================================================
--- GESTIÓN ESTRICTA DE PRIVILEGIOS (Acceso exclusivo de backend service_role)
+-- GESTIÓN ESTRICTA DE PRIVILEGIOS MÍNIMOS (Acceso exclusivo a service_role)
 -- ==============================================================================
--- 1. Revocar completamente cualquier permiso a PUBLIC, anon y authenticated
+-- 1. Revocar permisos a roles no autorizados
 REVOKE ALL ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) FROM authenticated;
 
--- 2. Conceder EXECUTE EXCLUSIVAMENTE a service_role (backend autenticado del servidor)
+-- 2. Conceder EXECUTE EXCLUSIVAMENTE a service_role
 GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;
 
--- 3. Recarga inmediata de caché de PostgREST
+-- 3. Notificar a PostgREST para recargar el esquema inmediatamente
 NOTIFY pgrst, 'reload schema';
-
