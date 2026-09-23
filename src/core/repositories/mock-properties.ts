@@ -1,4 +1,4 @@
-import { Property } from '../types/property';
+import type { Property } from '../types/property';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
 
 export const INITIAL_PROPERTIES: Property[] = [

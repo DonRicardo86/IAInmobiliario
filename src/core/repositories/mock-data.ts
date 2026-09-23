@@ -1,4 +1,4 @@
-import { Lead } from '../types/lead';
+import type { Lead } from '../types/lead';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
 
 export const INITIAL_LEADS: Lead[] = [

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 import { getSupabaseClient, getSupabaseUserClient } from '../database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '../types/organization';
 
@@ -202,8 +202,8 @@ export function hasRequiredRole(session: AuthSession | null, allowedRoles: UserR
 
 export function unauthorizedResponse(
   message = 'Acceso denegado: Esta operación administrativa requiere autenticación en el servidor.'
-): NextResponse {
-  return NextResponse.json(
+): Response {
+  return Response.json(
     {
       success: false,
       error: message,
@@ -215,8 +215,8 @@ export function unauthorizedResponse(
 
 export function forbiddenResponse(
   message = 'Acceso prohibido: Tu rol de usuario no tiene permisos para realizar esta operación.'
-): NextResponse {
-  return NextResponse.json(
+): Response {
+  return Response.json(
     {
       success: false,
       error: message,
@@ -228,8 +228,8 @@ export function forbiddenResponse(
 
 export function rateLimitResponse(
   message = 'Límite de solicitudes excedido. Por favor intenta de nuevo en un momento.'
-): NextResponse {
-  return NextResponse.json(
+): Response {
+  return Response.json(
     {
       success: false,
       error: message,

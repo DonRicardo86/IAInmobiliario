@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS public.leads (
     max_budget NUMERIC(15, 2),
     currency VARCHAR(10) DEFAULT 'COP',
     desired_features TEXT[] DEFAULT '{}',
-    interested_property_ids UUID[] DEFAULT '{}',
+    interested_property_ids TEXT[] DEFAULT '{}',
     notes TEXT,
     status VARCHAR(50) NOT NULL DEFAULT 'nuevo' CHECK (status IN ('nuevo', 'contactado', 'interesado', 'visita_agendada', 'negociacion', 'cerrado', 'no_interesado')),
     priority VARCHAR(50) NOT NULL DEFAULT 'medio' CHECK (priority IN ('alto', 'medio', 'bajo')),
@@ -360,8 +360,7 @@ DECLARE
     v_existing_lead_id UUID;
     v_new_lead_id UUID;
     v_prop_ref TEXT;
-    v_prop_found BOOLEAN;
-    v_verified_prop_ids TEXT[] := '{}';
+    v_verified_props TEXT[] := '{}';
 BEGIN
     -- 1. Validar autorización de tratamiento de datos (Habeas Data Ley 1581 de 2012)
     IF p_consent_habeas_data IS NOT TRUE THEN
@@ -389,22 +388,25 @@ BEGIN
             USING ERRCODE = '22000';
     END IF;
 
-    -- 4. Validar inmuebles de interés y verificar que pertenezcan a la organización receptora
+    -- 4. Validar y recolectar inmuebles de interés de esa organización
     IF p_interested_property_ids IS NOT NULL AND array_length(p_interested_property_ids, 1) > 0 THEN
         FOREACH v_prop_ref IN ARRAY p_interested_property_ids
         LOOP
             IF TRIM(v_prop_ref) <> '' THEN
-                SELECT EXISTS(
-                    SELECT 1 FROM public.properties
-                    WHERE organization_id = p_organization_id
-                      AND (code = TRIM(v_prop_ref) OR id::TEXT = TRIM(v_prop_ref))
-                ) INTO v_prop_found;
+                PERFORM 1 FROM public.properties
+                WHERE organization_id = p_organization_id
+                  AND (code = TRIM(v_prop_ref) OR id::TEXT = TRIM(v_prop_ref));
 
-                IF v_prop_found THEN
-                    v_verified_prop_ids := array_append(v_verified_prop_ids, TRIM(v_prop_ref));
+                IF FOUND THEN
+                    v_verified_props := array_append(v_verified_props, TRIM(v_prop_ref));
                 END IF;
             END IF;
         END LOOP;
+    END IF;
+
+    -- Si se enviaron referencias de inmueble no registradas, conservarlas para registro comercial
+    IF (v_verified_props IS NULL OR array_length(v_verified_props, 1) = 0) AND p_interested_property_ids IS NOT NULL THEN
+        v_verified_props := p_interested_property_ids;
     END IF;
 
     -- 5. Detección de duplicados para la misma organización (por correo o teléfono)
@@ -420,8 +422,8 @@ BEGIN
         INSERT INTO public.lead_activities (lead_id, description, type, author)
         VALUES (
             v_existing_lead_id,
-            'Nueva solicitud registrada desde ' || COALESCE(p_source, 'asistente_ia') || '. Inmuebles verificados: ' || 
-            CASE WHEN array_length(v_verified_prop_ids, 1) > 0 THEN array_to_string(v_verified_prop_ids, ', ') ELSE 'Búsqueda general' END || 
+            'Nueva solicitud registrada desde ' || COALESCE(p_source, 'asistente_ia') || '. Inmuebles: ' || 
+            CASE WHEN array_length(v_verified_props, 1) > 0 THEN array_to_string(v_verified_props, ', ') ELSE 'Búsqueda general' END || 
             '. Notas: ' || COALESCE(p_notes, 'Consulta web recurrente'),
             'contact_attempt',
             'Asistente SofIA'
@@ -468,7 +470,7 @@ BEGIN
         COALESCE(p_budget, 0),
         'COP',
         ARRAY[]::TEXT[],
-        v_verified_prop_ids,
+        COALESCE(v_verified_props, ARRAY[]::TEXT[]),
         COALESCE(p_notes, ''),
         'nuevo',
         'alto',

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { UnifiedDataService } from '@/core/database/supabase-adapter';
+import { UnifiedDataService, LeadPersistenceError, getSupabaseAdminClient } from '@/core/database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
 import { PropertyPublicView } from '@/core/types/property';
 import { checkRateLimit, rateLimitResponse, extractClientIp } from '@/core/auth/auth-guard';
@@ -21,7 +21,15 @@ export async function POST(req: NextRequest) {
 
     if (!org) {
       return NextResponse.json(
-        { success: false, error: `Organización "${identifier}" no encontrada en el sistema.` },
+        {
+          success: false,
+          error: `Organización "${identifier}" no encontrada en el sistema.`,
+          diagnostic: {
+            stage: 'ORG_RESOLUTION',
+            code: 'ERR_ORG_NOT_FOUND',
+            adminClientConfigured: !!getSupabaseAdminClient(),
+          },
+        },
         { status: 404 }
       );
     }
@@ -41,7 +49,14 @@ export async function POST(req: NextRequest) {
       // Validate required fields
       if (!name?.trim() || !phone?.trim() || !email?.trim()) {
         return NextResponse.json(
-          { success: false, error: 'Los datos de contacto (nombre, teléfono y correo) son obligatorios.' },
+          {
+            success: false,
+            error: 'Los datos de contacto (nombre, teléfono y correo) son obligatorios.',
+            diagnostic: {
+              stage: 'VALIDATION',
+              code: 'ERR_REQUIRED_CONTACT_FIELDS',
+            },
+          },
           { status: 400 }
         );
       }
@@ -52,6 +67,10 @@ export async function POST(req: NextRequest) {
           {
             success: false,
             error: 'Se requiere la autorización expresa de tratamiento de datos personales según la Ley 1581 de 2012 (Habeas Data).',
+            diagnostic: {
+              stage: 'VALIDATION',
+              code: 'ERR_HABEAS_DATA_REQUIRED',
+            },
           },
           { status: 400 }
         );
@@ -101,11 +120,20 @@ export async function POST(req: NextRequest) {
         });
       } catch (leadError: any) {
         console.error('[AssistantRoute] Error persisting public lead:', leadError);
+        const diagnostic = leadError instanceof LeadPersistenceError
+          ? leadError.diagnostic
+          : {
+              stage: 'PERSISTENCE_UNKNOWN',
+              code: leadError.code || 'ERR_LEAD_PERSISTENCE',
+              adminClientConfigured: !!getSupabaseAdminClient(),
+            };
+
         return NextResponse.json(
           {
             success: false,
             error: 'No fue posible registrar tu solicitud automáticamente en este momento.',
             message: `No fue posible registrar la solicitud en el sistema. Puedes comunicarte directamente con nuestro asesor comercial vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
+            diagnostic,
             fallbackContact: FALLBACK_CONTACT,
           },
           { status: 500 }

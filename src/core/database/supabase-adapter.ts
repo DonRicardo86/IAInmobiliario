@@ -1,7 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { Property, PropertyFilters, PropertyPublicView, CreatePropertyInput } from '../types/property';
-import { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
-import { Organization, DEFAULT_ORGANIZATION, KNOWN_ORGANIZATIONS } from '../types/organization';
+import type { Property, PropertyFilters, PropertyPublicView, CreatePropertyInput } from '../types/property';
+import type { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
+import { DEFAULT_ORGANIZATION, KNOWN_ORGANIZATIONS, type Organization } from '../types/organization';
 import { ServerStore } from './server-store';
 
 let supabaseAnonClient: SupabaseClient | null = null;
@@ -83,6 +83,28 @@ export function isSupabaseConnected(): boolean {
   return !!getSupabaseClient();
 }
 
+export interface PersistenceDiagnostic {
+  stage: 'INITIALIZATION' | 'VALIDATION' | 'ORG_RESOLUTION' | 'PROPERTY_RESOLUTION' | 'RPC_EXECUTION' | 'ADMIN_INSERT' | 'CONFIG_CHECK';
+  code: string;
+  rpcAttempted?: boolean;
+  rpcErrorCode?: string;
+  rpcErrorMessage?: string;
+  dbErrorCode?: string;
+  dbErrorMessage?: string;
+  adminClientConfigured?: boolean;
+  resolvedOrgId?: string;
+}
+
+export class LeadPersistenceError extends Error {
+  diagnostic: PersistenceDiagnostic;
+
+  constructor(message: string, diagnostic: PersistenceDiagnostic) {
+    super(message);
+    this.name = 'LeadPersistenceError';
+    this.diagnostic = diagnostic;
+  }
+}
+
 /**
  * Unified Repository Layer:
  * Uses Supabase PostgreSQL when credentials exist, and ServerStore when in local/demo mode.
@@ -147,8 +169,10 @@ export class UnifiedDataService {
     const targetSlugOrId = identifier || DEFAULT_ORGANIZATION.slug;
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetSlugOrId);
     const supabase = getSupabaseClient();
+    const adminSupabase = getSupabaseAdminClient();
     const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
 
+    // 1. Intentar resolver mediante vista public_organizations o cliente general
     if (supabase) {
       try {
         let query = supabase.from('public_organizations').select('*');
@@ -163,17 +187,33 @@ export class UnifiedDataService {
           return this.mapSupabasePublicOrgToDomain(data);
         }
         if (error) {
-          console.error('[SupabaseAdapter] Query public_organizations error:', error);
-          if (isProduction) {
-            throw new Error(`Error al consultar organización en Supabase: ${error.message}`);
-          }
+          console.warn('[SupabaseAdapter] Query public_organizations warning:', error.message);
         }
       } catch (err) {
-        if (isProduction) throw err;
-        console.error('[SupabaseAdapter] Fallback to known organizations error', err);
+        console.warn('[SupabaseAdapter] Exception querying public_organizations:', err);
       }
     }
 
+    // 2. Intentar resolver directamente en tabla organizations con cliente administrativo si está disponible
+    if (adminSupabase) {
+      try {
+        let adminQuery = adminSupabase.from('organizations').select('*');
+        if (isUuid) {
+          adminQuery = adminQuery.or(`id.eq.${targetSlugOrId},slug.eq.${targetSlugOrId}`);
+        } else {
+          adminQuery = adminQuery.eq('slug', targetSlugOrId);
+        }
+
+        const { data: adminOrg, error: adminError } = await adminQuery.maybeSingle();
+        if (!adminError && adminOrg) {
+          return this.mapSupabasePublicOrgToDomain(adminOrg);
+        }
+      } catch (err) {
+        console.warn('[SupabaseAdapter] Exception querying admin organizations:', err);
+      }
+    }
+
+    // 3. Fallback a organizaciones conocidas locales
     if (KNOWN_ORGANIZATIONS[targetSlugOrId]) {
       return KNOWN_ORGANIZATIONS[targetSlugOrId];
     }
@@ -597,22 +637,128 @@ export class UnifiedDataService {
 
     // 1. Validaciones obligatorias de servidor
     if (!leadData.name?.trim() || !leadData.phone?.trim() || !leadData.email?.trim()) {
-      throw new Error('Los datos de contacto (nombre, teléfono y correo electrónico) son obligatorios.');
+      throw new LeadPersistenceError(
+        'Los datos de contacto (nombre, teléfono y correo electrónico) son obligatorios.',
+        {
+          stage: 'VALIDATION',
+          code: 'ERR_REQUIRED_CONTACT_FIELDS',
+          adminClientConfigured: !!adminSupabase,
+        }
+      );
     }
     if (leadData.consentHabeasData === false) {
-      throw new Error('Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data Ley 1581 de 2012).');
+      throw new LeadPersistenceError(
+        'Se requiere la autorización expresa de tratamiento de datos personales (Habeas Data Ley 1581 de 2012).',
+        {
+          stage: 'VALIDATION',
+          code: 'ERR_HABEAS_DATA_REQUIRED',
+          adminClientConfigured: !!adminSupabase,
+        }
+      );
     }
 
     const cleanEmail = leadData.email.trim().toLowerCase();
     const cleanPhone = leadData.phone.trim();
     const cleanName = leadData.name.trim();
 
-    // 2. Ejecución exclusiva de servidor con clave administrativa (SUPABASE_SERVICE_ROLE_KEY)
+    // 2. Control estricto de producción: Rechazar si no está configurada la clave administrativa
+    if (isProduction && !adminSupabase) {
+      console.error('[SupabaseAdapter] ERROR CRÍTICO: SUPABASE_SERVICE_ROLE_KEY no está configurada en producción.');
+      throw new LeadPersistenceError(
+        'Error de configuración del servidor: Se requiere SUPABASE_SERVICE_ROLE_KEY para registrar prospectos en Supabase.',
+        {
+          stage: 'CONFIG_CHECK',
+          code: 'CONFIG_ERROR_MISSING_SERVICE_KEY',
+          adminClientConfigured: false,
+        }
+      );
+    }
+
+    // 3. Ejecución exclusiva de servidor con clave administrativa (SUPABASE_SERVICE_ROLE_KEY)
     if (adminSupabase) {
+      // 3.1 Resolución de UUID de organización
+      let resolvedOrgId = leadData.organizationId;
+      const isInitialUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedOrgId);
+
+      if (!isInitialUuid) {
+        try {
+          const { data: orgLookup } = await adminSupabase
+            .from('organizations')
+            .select('id')
+            .or(`slug.eq.${resolvedOrgId},id.eq.${resolvedOrgId}`)
+            .limit(1)
+            .maybeSingle();
+
+          if (orgLookup?.id) {
+            resolvedOrgId = orgLookup.id;
+          } else {
+            const pubOrg = await this.getPublicOrganizationBySlugOrId(resolvedOrgId);
+            if (pubOrg && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pubOrg.id)) {
+              resolvedOrgId = pubOrg.id;
+            }
+          }
+        } catch (orgErr) {
+          console.warn('[SupabaseAdapter] Error resolving organization UUID:', orgErr);
+        }
+      }
+
+      const isResolvedUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedOrgId);
+      if (!isResolvedUuid && isProduction) {
+        throw new LeadPersistenceError(
+          `La organización receptora "${leadData.organizationId}" no pudo ser validada como UUID en Supabase.`,
+          {
+            stage: 'ORG_RESOLUTION',
+            code: 'ERR_INVALID_ORG_UUID',
+            adminClientConfigured: true,
+            resolvedOrgId,
+          }
+        );
+      }
+
+      // 3.2 Resolución y verificación de inmuebles de interés (mapeo código -> UUID)
+      const rawPropertyRefs = Array.isArray(leadData.interestedPropertyIds) ? leadData.interestedPropertyIds : [];
+      const resolvedPropertyUuids: string[] = [];
+      const verifiedPropertyCodes: string[] = [];
+
+      for (const ref of rawPropertyRefs) {
+        const cleanRef = String(ref).trim();
+        if (!cleanRef) continue;
+
+        const isRefUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRef);
+        if (isRefUuid) {
+          resolvedPropertyUuids.push(cleanRef);
+          verifiedPropertyCodes.push(cleanRef);
+        } else {
+          try {
+            const { data: propData } = await adminSupabase
+              .from('properties')
+              .select('id, code')
+              .eq('organization_id', resolvedOrgId)
+              .or(`code.ilike.${cleanRef},code.eq.${cleanRef}`)
+              .limit(1)
+              .maybeSingle();
+
+            if (propData) {
+              resolvedPropertyUuids.push(propData.id);
+              verifiedPropertyCodes.push(propData.code);
+            } else {
+              verifiedPropertyCodes.push(cleanRef);
+            }
+          } catch (propErr) {
+            verifiedPropertyCodes.push(cleanRef);
+          }
+        }
+      }
+
+      let rpcAttempted = false;
+      let rpcErrorCode: string | undefined;
+      let rpcErrorMessage: string | undefined;
+
+      // Intento A: Invocar el procedimiento atómico capture_public_lead con privilegios service_role
       try {
-        // Intento A: Invocar el procedimiento atómico capture_public_lead con privilegios service_role
+        rpcAttempted = true;
         const { data: rpcData, error: rpcError } = await adminSupabase.rpc('capture_public_lead', {
-          p_organization_id: leadData.organizationId,
+          p_organization_id: resolvedOrgId,
           p_name: cleanName,
           p_phone: cleanPhone,
           p_email: cleanEmail,
@@ -621,7 +767,7 @@ export class UnifiedDataService {
           p_municipality: leadData.municipality || 'Medellín',
           p_zone: leadData.zone || 'El Poblado',
           p_budget: Number(leadData.budget) || 0,
-          p_interested_property_ids: leadData.interestedPropertyIds || [],
+          p_interested_property_ids: verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs,
           p_notes: leadData.notes || '',
           p_consent_habeas_data: true,
           p_source: leadData.source || 'asistente_ia',
@@ -638,14 +784,21 @@ export class UnifiedDataService {
         }
 
         if (rpcError) {
-          console.warn('[SupabaseAdapter] RPC capture_public_lead not available or errored, attempting direct admin insert:', rpcError.message);
+          rpcErrorCode = rpcError.code;
+          rpcErrorMessage = rpcError.message;
+          console.warn(`[SupabaseAdapter] RPC capture_public_lead error [${rpcError.code}]: ${rpcError.message}. Switching to Direct Admin Insert.`);
         }
+      } catch (rpcEx: any) {
+        rpcErrorMessage = rpcEx.message;
+        console.warn('[SupabaseAdapter] RPC invocation exception, falling back to direct admin insert:', rpcEx.message);
+      }
 
-        // Intento B: Inserción directa mediante cliente service_role con validación de duplicados
+      // Intento B: Inserción directa mediante cliente service_role con validación de duplicados
+      try {
         const { data: existingLead } = await adminSupabase
           .from('leads')
           .select('id')
-          .eq('organization_id', leadData.organizationId)
+          .eq('organization_id', resolvedOrgId)
           .or(`email.eq.${cleanEmail},phone.eq.${cleanPhone}`)
           .order('created_at', { ascending: false })
           .limit(1)
@@ -654,7 +807,7 @@ export class UnifiedDataService {
         if (existingLead) {
           await adminSupabase.from('lead_activities').insert({
             lead_id: existingLead.id,
-            description: `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${(leadData.interestedPropertyIds || []).join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
+            description: `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${verifiedPropertyCodes.join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
             type: 'contact_attempt',
             author: 'Asistente SofIA',
           });
@@ -667,8 +820,9 @@ export class UnifiedDataService {
           };
         }
 
+        // Se usa resolvedPropertyUuids (array de UUIDs válidos) para garantizar compatibilidad estricta con UUID[]
         const payload = this.mapDomainLeadToSupabase({
-          organizationId: leadData.organizationId,
+          organizationId: resolvedOrgId,
           name: cleanName,
           phone: cleanPhone,
           email: cleanEmail,
@@ -679,7 +833,7 @@ export class UnifiedDataService {
           budget: Number(leadData.budget) || 0,
           currency: 'COP',
           desiredFeatures: [],
-          interestedPropertyIds: leadData.interestedPropertyIds || [],
+          interestedPropertyIds: resolvedPropertyUuids,
           notes: leadData.notes || '',
           status: 'nuevo',
           priority: 'alto',
@@ -695,14 +849,27 @@ export class UnifiedDataService {
           .single();
 
         if (insertError) {
-          console.error('[SupabaseAdapter] Admin lead insertion error:', insertError);
-          throw new Error(`Error en PostgreSQL al registrar prospecto: ${insertError.message}`);
+          console.error('[SupabaseAdapter] Admin lead insertion error in PostgreSQL:', insertError);
+          throw new LeadPersistenceError(
+            `Error en PostgreSQL al registrar prospecto: ${insertError.message}`,
+            {
+              stage: 'ADMIN_INSERT',
+              code: insertError.code ? `PG_${insertError.code}` : 'ERR_POSTGRES_INSERT',
+              dbErrorCode: insertError.code,
+              dbErrorMessage: insertError.message,
+              rpcAttempted,
+              rpcErrorCode,
+              rpcErrorMessage,
+              adminClientConfigured: true,
+              resolvedOrgId,
+            }
+          );
         }
 
         if (insertedLead) {
           await adminSupabase.from('lead_activities').insert({
             lead_id: insertedLead.id,
-            description: `Prospecto captado exitosamente mediante ${leadData.source || 'asistente_ia'}. Autorización Habeas Data verificada.`,
+            description: `Prospecto captado exitosamente mediante ${leadData.source || 'asistente_ia'}. Inmuebles de interés: ${verifiedPropertyCodes.join(', ') || 'General'}. Autorización Habeas Data verificada.`,
             type: 'created',
             author: 'Sistema IA',
           });
@@ -715,15 +882,21 @@ export class UnifiedDataService {
           };
         }
       } catch (err: any) {
-        console.error('[SupabaseAdapter] Exception in createPublicLead:', err);
-        throw new Error(err.message || 'Error al persistir prospecto en Supabase.');
+        if (err instanceof LeadPersistenceError) throw err;
+        console.error('[SupabaseAdapter] Exception in direct admin insert:', err);
+        throw new LeadPersistenceError(
+          err.message || 'Error al persistir prospecto en Supabase.',
+          {
+            stage: 'ADMIN_INSERT',
+            code: 'ERR_ADMIN_INSERT_EXCEPTION',
+            dbErrorMessage: err.message,
+            rpcAttempted,
+            rpcErrorCode,
+            adminClientConfigured: true,
+            resolvedOrgId,
+          }
+        );
       }
-    }
-
-    // 3. Control de producción estricto: Si no hay clave admin en producción, RECHAZAR sin fallback a memoria
-    if (isProduction) {
-      console.error('[SupabaseAdapter] ERROR CRÍTICO: SUPABASE_SERVICE_ROLE_KEY no está configurada en producción.');
-      throw new Error('Error de configuración del servidor: Se requiere SUPABASE_SERVICE_ROLE_KEY para registrar prospectos en Supabase.');
     }
 
     // 4. Modo desarrollo local / demostración en memoria explícita (NO PRODUCCIÓN)

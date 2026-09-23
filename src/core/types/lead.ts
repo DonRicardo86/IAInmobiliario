@@ -1,5 +1,5 @@
 export type { OperationType, PropertyType } from './property';
-import { OperationType, PropertyType } from './property';
+import type { OperationType, PropertyType } from './property';
 
 export type LeadStatus =
   | 'nuevo'

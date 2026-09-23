@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { Property, PropertyFilters, PropertyPublicView, CreatePropertyInput } from '../types/property';
-import { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
-import { Organization, DEFAULT_ORGANIZATION } from '../types/organization';
+import type { Property, PropertyFilters, PropertyPublicView, CreatePropertyInput } from '../types/property';
+import type { Lead, LeadFilters, LeadStats, CreateLeadInput } from '../types/lead';
+import { DEFAULT_ORGANIZATION, type Organization } from '../types/organization';
 import { INITIAL_PROPERTIES } from '../repositories/mock-properties';
 import { INITIAL_LEADS } from '../repositories/mock-data';
 

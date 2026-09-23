@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { UnifiedDataService } from '@/core/database/supabase-adapter';
+import { UnifiedDataService, LeadPersistenceError, getSupabaseAdminClient } from '@/core/database/supabase-adapter';
 import {
   authenticateAdminRequest,
   unauthorizedResponse,
@@ -187,11 +187,20 @@ export async function POST(req: NextRequest) {
     );
   } catch (error: any) {
     console.error('[LeadsRoute] Error in POST /api/leads:', error);
+    const diagnostic = error instanceof LeadPersistenceError
+      ? error.diagnostic
+      : {
+          stage: 'PERSISTENCE_UNKNOWN',
+          code: error.code || 'ERR_LEAD_POST',
+          adminClientConfigured: !!getSupabaseAdminClient(),
+        };
+
     return NextResponse.json(
       {
         success: false,
         error: error.message || 'No fue posible registrar la solicitud en este momento.',
         message: `No fue posible registrar la solicitud en el CRM. Puedes contactarnos directamente vía WhatsApp (${FALLBACK_CONTACT.whatsapp}) o al correo ${FALLBACK_CONTACT.email}.`,
+        diagnostic,
         fallbackContact: FALLBACK_CONTACT,
       },
       { status: 400 }
