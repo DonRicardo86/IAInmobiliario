@@ -48,33 +48,33 @@ async function runLiveHarness() {
 
     // 1.1 Verificación de Compound Foreign Key
     const hasCompoundFK = schemaSql.includes('FOREIGN KEY (property_id, organization_id)') &&
-                          schemaSql.includes('REFERENCES public.properties(id, organization_id)');
+      schemaSql.includes('REFERENCES public.properties(id, organization_id)');
     assert(hasCompoundFK, 'Constraint FK compuesto (property_id, organization_id) presente en property_private_details');
 
     // 1.2 Verificación de Anti-Escalamiento de Privilegios
     const hasAntiEscalationPolicy = schemaSql.includes('"Org admin can add operational members"') &&
-                                    schemaSql.includes("role IN ('admin', 'agent', 'viewer')");
+      schemaSql.includes("role IN ('admin', 'agent', 'viewer')");
     assert(hasAntiEscalationPolicy, 'Política RLS restringe a los administradores nombrar roles owner');
 
     // 1.3 Verificación de Protección del Último Owner
     const hasLastOwnerTrigger = schemaSql.includes('check_organization_owner_integrity') &&
-                                schemaSql.includes('tr_org_members_owner_integrity');
+      schemaSql.includes('tr_org_members_owner_integrity');
     assert(hasLastOwnerTrigger, 'Trigger tr_org_members_owner_integrity protege contra eliminación del último owner');
 
     // 1.4 Verificación de Vista Sanitizada de Organizaciones
     const hasPublicOrgView = schemaSql.includes('VIEW public.public_organizations') &&
-                             schemaSql.includes('security_barrier = true');
+      schemaSql.includes('security_barrier = true');
     assert(hasPublicOrgView, 'Vista sanitizada public.public_organizations configurada con security_barrier');
 
     // 1.5 Verificación de Revocación Anónima en Tablas Base
     const hasRevokeAllTables = schemaSql.includes('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon') ||
-                               schemaSql.includes('REVOKE ALL ON public.properties FROM anon');
+      schemaSql.includes('REVOKE ALL ON public.properties FROM anon');
     const hasRevokeRoutines = schemaSql.includes('REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM PUBLIC, anon');
     assert(hasRevokeAllTables && hasRevokeRoutines, 'Permisos directos a anon y PUBLIC revocados en tablas base y rutinas');
 
     // 1.6 Verificación de Rate Limiter Distribuido
     const hasDistributedRateLimit = schemaSql.includes('check_distributed_rate_limit') &&
-                                    schemaSql.includes('public.api_rate_limits');
+      schemaSql.includes('public.api_rate_limits');
     assert(hasDistributedRateLimit, 'Función y tabla de rate limiting distribuido check_distributed_rate_limit definidas');
 
     // 1.7 Verificación de search_path seguro

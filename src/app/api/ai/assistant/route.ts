@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { UnifiedDataService } from '@/core/database/supabase-adapter';
 import { DEFAULT_ORGANIZATION } from '@/core/types/organization';
 import { PropertyPublicView } from '@/core/types/property';
-import { checkRateLimit, rateLimitResponse } from '@/core/auth/auth-guard';
+import { checkRateLimit, rateLimitResponse, extractClientIp } from '@/core/auth/auth-guard';
 
 const FALLBACK_CONTACT = {
   whatsapp: '+57 304 360 5155',
@@ -13,6 +13,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { messages, userContext, leadCapture, organizationId, orgSlug } = body;
+    const clientIp = extractClientIp(req);
 
     // 1. Resolve organization safely from slug or ID against Supabase
     const identifier = orgSlug || organizationId || req.nextUrl.searchParams.get('org') || DEFAULT_ORGANIZATION.slug;
@@ -29,10 +30,10 @@ export async function POST(req: NextRequest) {
 
     // 2. Direct lead capture request from the assistant
     if (leadCapture) {
-      const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+      // Dedicated rate limit bucket for lead intake (15 requests/min per IP)
       const isAllowed = await checkRateLimit(clientIp, 'api/ai/assistant/lead', 15, 60);
       if (!isAllowed) {
-        return rateLimitResponse('Has enviado demasiadas solicitudes. Por favor espera un momento antes de reintentar.');
+        return rateLimitResponse('Has enviado demasiadas solicitudes de contacto. Por favor espera un momento antes de reintentar.');
       }
 
       const { name, phone, email, criteria, propertyIds, notes, consentHabeasData } = leadCapture;

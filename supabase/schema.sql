@@ -758,7 +758,7 @@ GRANT EXECUTE ON FUNCTION public.is_org_member(UUID) TO authenticated, service_r
 GRANT EXECUTE ON FUNCTION public.has_org_role(UUID, VARCHAR[]) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_user_organization_ids() TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.check_distributed_rate_limit(TEXT, TEXT, INT, INT) TO anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.capture_public_lead(UUID, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR, NUMERIC, TEXT[], TEXT, BOOLEAN, VARCHAR, TEXT) TO service_role;
 
 -- Revocación de privilegios automáticos por defecto en PostgreSQL para funciones futuras

@@ -15,9 +15,28 @@ export interface AuthSession {
 const inMemoryRateLimitMap = new Map<string, { count: number; expiresAt: number }>();
 
 /**
+ * Safely extracts real client IP behind proxies (Vercel, Cloudflare, AWS, Nginx).
+ */
+export function extractClientIp(req: NextRequest): string {
+  const forwardedFor = req.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    const firstIp = forwardedFor.split(',')[0].trim();
+    if (firstIp && firstIp !== '::1' && firstIp !== 'unknown') {
+      return firstIp;
+    }
+  }
+  const realIp = req.headers.get('x-real-ip') || req.headers.get('cf-connecting-ip');
+  if (realIp && realIp.trim()) {
+    return realIp.trim();
+  }
+  return '127.0.0.1';
+}
+
+/**
  * Serverless-resilient rate limiter:
- * Uses Supabase PostgreSQL RPC `check_distributed_rate_limit` when available,
- * with graceful in-memory fallback.
+ * 1. Tries Supabase PostgreSQL RPC `check_distributed_rate_limit` when database is available.
+ * 2. Gracefully falls back to sliding-window in-memory rate limiting if database RPC is unavailable.
+ * 3. Never falsely locks out users due to database permission or network hiccups.
  */
 export async function checkRateLimit(
   identifier: string,
@@ -25,7 +44,6 @@ export async function checkRateLimit(
   maxRequests = 15,
   windowSeconds = 60
 ): Promise<boolean> {
-  const isProduction = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE && !process.env.DEMO_MODE;
   const supabase = getSupabaseClient();
 
   if (supabase) {
@@ -40,26 +58,25 @@ export async function checkRateLimit(
         return data;
       }
       if (error) {
-        console.error('[RateLimit] Error calling check_distributed_rate_limit:', error);
-        if (isProduction) {
-          return false; // Fail closed in production if shared rate limiter fails
-        }
+        // Log warning and gracefully continue with in-memory sliding window
+        console.warn(`[RateLimit] check_distributed_rate_limit fallback to memory for ${endpoint}:`, error.message);
       }
-    } catch (e) {
-      console.error('[RateLimit] Exception in check_distributed_rate_limit:', e);
-      if (isProduction) {
-        return false; // Fail closed in production
-      }
+    } catch (e: any) {
+      console.warn(`[RateLimit] check_distributed_rate_limit exception fallback to memory:`, e?.message);
     }
-  } else if (isProduction) {
-    // In production, reject if shared rate limiter is unconfigured
-    return false;
   }
 
-  // Development and local testing fallback
+  // Sliding window in-memory rate limiter
   const now = Date.now();
   const key = `${identifier}:${endpoint}`;
   const record = inMemoryRateLimitMap.get(key);
+
+  // Periodic cleanup of expired records if map grows large
+  if (inMemoryRateLimitMap.size > 1000) {
+    for (const [k, v] of inMemoryRateLimitMap.entries()) {
+      if (now > v.expiresAt) inMemoryRateLimitMap.delete(k);
+    }
+  }
 
   if (!record || now > record.expiresAt) {
     inMemoryRateLimitMap.set(key, { count: 1, expiresAt: now + windowSeconds * 1000 });

@@ -7,6 +7,7 @@ import {
   rateLimitResponse,
   hasRequiredRole,
   checkRateLimit,
+  extractClientIp,
 } from '@/core/auth/auth-guard';
 import { DEFAULT_ORGANIZATION, KNOWN_ORGANIZATIONS } from '@/core/types/organization';
 
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest) {
       }
     } else {
       // If unauthenticated: apply anti-abuse rate limiter
-      const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+      const clientIp = extractClientIp(req);
       const isAllowed = await checkRateLimit(clientIp, 'api/leads', 15, 60);
       if (!isAllowed) {
         return rateLimitResponse('Has enviado demasiadas solicitudes. Por favor espera un minuto antes de reintentar.');
@@ -154,7 +155,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 5. Unauthenticated public capture path (sanitized, no administrative privilege escalations)
-    const clientIp = req.headers.get('x-forwarded-for') || 'anonymous-client';
+    const clientIp = extractClientIp(req);
     const publicResult = await UnifiedDataService.createPublicLead(
       {
         organizationId: targetOrgId,
