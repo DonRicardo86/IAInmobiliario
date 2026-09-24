@@ -12,6 +12,21 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { existsSync, readFileSync } from 'fs';
+
+// Cargar .env.local si existe en el entorno local
+if (existsSync('.env.local')) {
+  const envContent = readFileSync('.env.local', 'utf-8');
+  envContent.split('\n').forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+      const idx = trimmed.indexOf('=');
+      const key = trimmed.substring(0, idx).trim();
+      const val = trimmed.substring(idx + 1).trim().replace(/^["']|["']$/g, '');
+      process.env[key] = val;
+    }
+  });
+}
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';

@@ -24,9 +24,7 @@ if (existsSync('.env.local')) {
       const idx = trimmed.indexOf('=');
       const key = trimmed.substring(0, idx).trim();
       const val = trimmed.substring(idx + 1).trim().replace(/^["']|["']$/g, '');
-      if (!process.env[key]) {
-        process.env[key] = val;
-      }
+      process.env[key] = val;
     }
   });
 }

@@ -892,21 +892,125 @@ export class UnifiedDataService {
       }
 
       if (rpcError) {
-        console.error(`[SupabaseAdapter] RPC capture_public_lead failed [${rpcError.code}]:`, rpcError.message);
-        throw new LeadPersistenceError(
-          `Error en Supabase al registrar prospecto: ${rpcError.message}`,
-          {
-            stage: 'RPC_EXECUTION',
-            code: rpcError.code ? `PG_${rpcError.code}` : 'ERR_RPC_EXECUTION',
-            dbErrorCode: rpcError.code,
-            dbErrorMessage: rpcError.message,
-            rpcAttempted: true,
-            rpcErrorCode: rpcError.code,
-            rpcErrorMessage: rpcError.message,
-            adminClientConfigured: true,
-            resolvedOrgId,
+        console.warn(`[SupabaseAdapter] RPC capture_public_lead error [${rpcError.code}]: ${rpcError.message}. Intentando persistencia directa mediante cliente administrativo...`);
+        try {
+          // 1. Detección de duplicados para la misma organización
+          const { data: existingLead } = await adminSupabase
+            .from('leads')
+            .select('id')
+            .eq('organization_id', resolvedOrgId)
+            .or(`email.eq.${cleanEmail},phone.eq.${cleanPhone}`)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (existingLead?.id) {
+            await adminSupabase.from('lead_activities').insert({
+              lead_id: existingLead.id,
+              type: 'contact_attempt',
+              description: `Nueva solicitud registrada desde ${leadData.source || 'asistente_ia'}. Inmuebles: ${(verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs).join(', ') || 'Búsqueda general'}. Notas: ${leadData.notes || 'Consulta web recurrente'}`,
+              author: 'Asistente SofIA',
+            });
+
+            return {
+              success: true,
+              leadId: existingLead.id,
+              isDuplicate: true,
+              message: 'Solicitud actualizada para el prospecto existente en Supabase.',
+            };
           }
-        );
+
+          // 2. Inserción de nuevo prospecto con resolución de UUIDs para interested_property_ids
+          let propIdsToInsert: any = resolvedPropertyUuids.length > 0 ? resolvedPropertyUuids : [];
+
+          let insertRes = await adminSupabase
+            .from('leads')
+            .insert({
+              organization_id: resolvedOrgId,
+              name: cleanName,
+              phone: cleanPhone,
+              email: cleanEmail,
+              operation_type: leadData.operationType || 'compra',
+              property_type: leadData.propertyType || 'apartamento',
+              municipality: leadData.municipality || 'Medellín',
+              zone: leadData.zone || 'El Poblado',
+              budget: Number(leadData.budget) || 0,
+              currency: 'COP',
+              desired_features: [],
+              interested_property_ids: propIdsToInsert,
+              notes: leadData.notes || '',
+              status: 'nuevo',
+              priority: 'medio',
+              source: leadData.source || 'asistente_ia',
+              assigned_agent: 'Sin Asignar',
+              consent_habeas_data: leadData.consentHabeasData === true,
+            })
+            .select('id')
+            .single();
+
+          if (insertRes.error && insertRes.error.code === '42804') {
+            insertRes = await adminSupabase
+              .from('leads')
+              .insert({
+                organization_id: resolvedOrgId,
+                name: cleanName,
+                phone: cleanPhone,
+                email: cleanEmail,
+                operation_type: leadData.operationType || 'compra',
+                property_type: leadData.propertyType || 'apartamento',
+                municipality: leadData.municipality || 'Medellín',
+                zone: leadData.zone || 'El Poblado',
+                budget: Number(leadData.budget) || 0,
+                currency: 'COP',
+                desired_features: [],
+                interested_property_ids: verifiedPropertyCodes.length > 0 ? verifiedPropertyCodes : rawPropertyRefs,
+                notes: leadData.notes || '',
+                status: 'nuevo',
+                priority: 'medio',
+                source: leadData.source || 'asistente_ia',
+                assigned_agent: 'Sin Asignar',
+                consent_habeas_data: leadData.consentHabeasData === true,
+              })
+              .select('id')
+              .single();
+          }
+
+          if (insertRes.error) {
+            throw insertRes.error;
+          }
+
+          if (insertRes.data?.id) {
+            await adminSupabase.from('lead_activities').insert({
+              lead_id: insertRes.data.id,
+              type: 'created',
+              description: `Prospecto captado desde ${leadData.source || 'asistente_ia'}.`,
+              author: 'Sistema SofIA',
+            });
+
+            return {
+              success: true,
+              leadId: insertRes.data.id,
+              isDuplicate: false,
+              message: 'Prospecto registrado exitosamente en Supabase.',
+            };
+          }
+        } catch (directErr: any) {
+          console.error('[SupabaseAdapter] Administrative direct lead persistence error:', directErr);
+          throw new LeadPersistenceError(
+            `Error en Supabase al registrar prospecto: ${directErr.message || rpcError.message}`,
+            {
+              stage: 'ADMIN_INSERT',
+              code: directErr.code ? `PG_${directErr.code}` : (rpcError.code ? `PG_${rpcError.code}` : 'ERR_RPC_EXECUTION'),
+              dbErrorCode: directErr.code || rpcError.code,
+              dbErrorMessage: directErr.message || rpcError.message,
+              rpcAttempted: true,
+              rpcErrorCode: rpcError.code,
+              rpcErrorMessage: rpcError.message,
+              adminClientConfigured: true,
+              resolvedOrgId,
+            }
+          );
+        }
       }
     }
 
